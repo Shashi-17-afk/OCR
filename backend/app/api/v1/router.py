@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from backend.app.api.v1.endpoints import documents, health
+from backend.app.api.v1.endpoints import bookings, documents, health
 
 api_v1_router = APIRouter()
 
@@ -14,3 +14,8 @@ api_v1_router.include_router(
     tags=["Documents"],
 )
 
+api_v1_router.include_router(
+    bookings.router,
+    prefix="/bookings",
+    tags=["Bookings"],
+)

@@ -3,6 +3,7 @@ from backend.app.schemas.error import ErrorResponse
 from backend.app.schemas.document import (
     PageStatus,
     DocumentOverallStatus,
+    OCRLineResult,
     PageProcessingResult,
     DocumentIngestResponse,
 )
@@ -12,6 +13,7 @@ __all__ = [
     "ErrorResponse",
     "PageStatus",
     "DocumentOverallStatus",
+    "OCRLineResult",
     "PageProcessingResult",
     "DocumentIngestResponse",
 ]

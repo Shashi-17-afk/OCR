@@ -5,6 +5,9 @@ pydantic-settings>=2.4.0
 pymupdf>=2.0.0
 python-multipart>=0.0.20
 pillow>=11.0.0
+rapidocr-onnxruntime>=1.2.3
+opencv-python>=4.10.0
+
 
 # Testing dependencies
 pytest>=8.3.0

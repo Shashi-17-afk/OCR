@@ -21,6 +21,13 @@ class Settings(BaseSettings):
     MAX_IMAGE_DIMENSION_PX: int = 10000
     ALLOWED_EXTENSIONS: list[str] = ["pdf", "png", "jpg", "jpeg"]
 
+    # Local OCR Configuration
+    OCR_ENABLED: bool = True
+    OCR_ENGINE: str = "rapidocr"  # "rapidocr" | "mock"
+    OCR_DPI: int = 300
+    OCR_MAX_IMAGE_SIDE_PX: int = 4000
+    ENABLE_DESKEW: bool = True
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

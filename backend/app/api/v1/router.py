@@ -13,3 +13,4 @@ api_v1_router.include_router(
     prefix="/documents",
     tags=["Documents"],
 )
+

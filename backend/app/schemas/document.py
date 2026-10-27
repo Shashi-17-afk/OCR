@@ -21,6 +21,19 @@ class DocumentOverallStatus(str, Enum):
     VALIDATED_IMAGE = "VALIDATED_IMAGE"
 
 
+class OCRLineResult(BaseModel):
+    """Recognized line or word box with text, confidence, and polygon coordinates."""
+
+    text: str = Field(description="Recognized text string")
+    confidence: Optional[float] = Field(
+        default=None,
+        description="OCR confidence score between 0.0 and 1.0; null when unprovided",
+    )
+    box: list[list[float]] = Field(
+        description="4-point polygon coordinates [[x1, y1], [x2, y2], [x3, y3], [x4, y4]]"
+    )
+
+
 class PageProcessingResult(BaseModel):
     """Structured result for a single page."""
 
@@ -28,11 +41,23 @@ class PageProcessingResult(BaseModel):
     status: PageStatus = Field(description="Page processing status")
     has_embedded_text: bool = Field(description="True if usable embedded text was found")
     is_scanned: bool = Field(description="True if page is a raster scan or image")
+    extraction_method: Optional[str] = Field(
+        default=None,
+        description="Extraction technique: 'EMBEDDED_TEXT' or 'OCR'",
+    )
+    ocr_confidence: Optional[float] = Field(
+        default=None,
+        description="Average OCR confidence for the page (0.0 to 1.0); None for embedded text",
+    )
     char_count: int = Field(default=0, ge=0, description="Number of extracted characters")
     word_count: int = Field(default=0, ge=0, description="Number of extracted words")
     extracted_text: Optional[str] = Field(
         default=None,
-        description="Extracted embedded text; null when OCR is required or page is empty",
+        description="Extracted embedded text or OCR text; null when page is empty or OCR produced no text",
+    )
+    bounding_boxes: Optional[list[OCRLineResult]] = Field(
+        default=None,
+        description="Per-line/word OCR bounding boxes and confidence scores",
     )
     error_message: Optional[str] = Field(
         default=None,

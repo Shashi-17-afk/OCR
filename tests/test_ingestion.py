@@ -1,3 +1,4 @@
+import io
 import os
 from fastapi import status
 from fastapi.testclient import TestClient
@@ -36,10 +37,10 @@ def test_text_based_pdf_ingestion(client: TestClient) -> None:
 
 
 def test_scanned_pdf_returns_ocr_required(client: TestClient) -> None:
-    """Verify scanned PDF returns explicit OCR_REQUIRED status with null extracted text."""
+    """Verify scanned PDF returns explicit OCR_REQUIRED status when OCR is disabled."""
     pdf_bytes = create_scanned_pdf(pages=1)
     response = client.post(
-        "/api/v1/documents/ingest",
+        "/api/v1/documents/ingest?enable_ocr=false",
         files={"file": ("scanned_lr.pdf", pdf_bytes, "application/pdf")},
     )
     assert response.status_code == status.HTTP_200_OK
@@ -56,10 +57,10 @@ def test_scanned_pdf_returns_ocr_required(client: TestClient) -> None:
 
 
 def test_mixed_pdf_ingestion(client: TestClient) -> None:
-    """Verify mixed PDF (Page 1 text, Page 2 scan) returns MIXED_CONTENT and per-page accuracy."""
+    """Verify mixed PDF (Page 1 text, Page 2 scan) returns MIXED_CONTENT when OCR is disabled."""
     pdf_bytes = create_mixed_pdf()
     response = client.post(
-        "/api/v1/documents/ingest",
+        "/api/v1/documents/ingest?enable_ocr=false",
         files={"file": ("mixed_document.pdf", pdf_bytes, "application/pdf")},
     )
     assert response.status_code == status.HTTP_200_OK
@@ -82,11 +83,11 @@ def test_mixed_pdf_ingestion(client: TestClient) -> None:
 
 
 def test_valid_image_ingestion_png_and_jpeg(client: TestClient) -> None:
-    """Verify valid PNG and JPEG images are decoded and marked as VALIDATED_IMAGE with OCR_REQUIRED."""
+    """Verify valid PNG and JPEG images are decoded and marked as VALIDATED_IMAGE when OCR is disabled."""
     # Test PNG
     png_bytes = create_synthetic_image("PNG", 200, 200)
     resp_png = client.post(
-        "/api/v1/documents/ingest",
+        "/api/v1/documents/ingest?enable_ocr=false",
         files={"file": ("photo_lr.png", png_bytes, "image/png")},
     )
     assert resp_png.status_code == status.HTTP_200_OK
@@ -98,7 +99,7 @@ def test_valid_image_ingestion_png_and_jpeg(client: TestClient) -> None:
     # Test JPEG
     jpeg_bytes = create_synthetic_image("JPEG", 200, 200)
     resp_jpeg = client.post(
-        "/api/v1/documents/ingest",
+        "/api/v1/documents/ingest?enable_ocr=false",
         files={"file": ("photo_invoice.jpg", jpeg_bytes, "image/jpeg")},
     )
     assert resp_jpeg.status_code == status.HTTP_200_OK

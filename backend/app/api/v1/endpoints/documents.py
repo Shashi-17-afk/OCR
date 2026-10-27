@@ -1,4 +1,4 @@
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
 
 from backend.app.core.config import settings
 from backend.app.schemas.document import DocumentIngestResponse
@@ -35,6 +35,10 @@ router = APIRouter()
 )
 async def ingest_document(
     file: UploadFile = File(..., description="Binary document file (PDF, PNG, JPEG)"),
+    enable_ocr: bool = Query(
+        default=True,
+        description="Whether to run local OCR on scanned PDF pages and standalone images",
+    ),
 ) -> DocumentIngestResponse:
     """Ingests, validates, and extracts text from an uploaded document."""
     # Defensively read file content with memory bound
@@ -53,6 +57,7 @@ async def ingest_document(
         response = DocumentIngestionService.process_document(
             content=content,
             original_filename=filename,
+            enable_ocr=enable_ocr,
         )
         return response
 

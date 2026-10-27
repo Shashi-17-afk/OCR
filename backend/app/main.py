@@ -1,6 +1,6 @@
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -45,6 +45,7 @@ def create_app() -> FastAPI:
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
         logger.warning("Validation error on %s: %s", request.url.path, exc.errors())
+        # Sanitize validation errors to exclude raw input values
         sanitized_details = [
             {
                 "field": " -> ".join(str(loc) for loc in err.get("loc", [])),
@@ -65,6 +66,7 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+        # Log error securely without printing user payload
         logger.error("Unhandled server exception on %s: %s", request.url.path, exc.__class__.__name__, exc_info=True)
         payload = ErrorResponse(
             error_code="INTERNAL_SERVER_ERROR",
@@ -78,6 +80,7 @@ def create_app() -> FastAPI:
     # Include API v1 router
     app.include_router(api_v1_router, prefix=settings.API_V1_PREFIX)
 
+    # Convenience root-level health endpoint matching API v1 health
     @app.get(
         "/health",
         response_model=HealthResponse,

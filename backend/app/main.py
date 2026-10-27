@@ -1,0 +1,105 @@
+from contextlib import asynccontextmanager
+from typing import AsyncGenerator
+from fastapi import FastAPI, Request, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from backend.app.api.v1.router import api_v1_router
+from backend.app.core.config import settings
+from backend.app.core.logging import logger, setup_logging
+from backend.app.schemas.error import ErrorResponse
+from backend.app.schemas.health import HealthResponse
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """Application startup and shutdown lifespan handler."""
+    setup_logging()
+    logger.info("Starting %s v%s in %s mode", settings.APP_NAME, settings.APP_VERSION, settings.APP_ENV)
+    yield
+    logger.info("Shutting down %s", settings.APP_NAME)
+
+
+def create_app() -> FastAPI:
+    """Application factory for the FastAPI backend."""
+    app = FastAPI(
+        title=settings.APP_NAME,
+        version=settings.APP_VERSION,
+        docs_url="/docs" if settings.DEBUG else None,
+        redoc_url="/redoc" if settings.DEBUG else None,
+        openapi_url="/openapi.json" if settings.DEBUG else None,
+        lifespan=lifespan,
+    )
+
+    # Global Exception Handlers for safe, non-leaking error responses
+    @app.exception_handler(StarletteHTTPException)
+    async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        logger.warning("HTTP %d error on %s: %s", exc.status_code, request.url.path, exc.detail)
+        payload = ErrorResponse(
+            error_code=f"HTTP_{exc.status_code}",
+            message=str(exc.detail),
+        )
+        return JSONResponse(status_code=exc.status_code, content=payload.model_dump(mode="json"))
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+        logger.warning("Validation error on %s: %s", request.url.path, exc.errors())
+        sanitized_details = [
+            {
+                "field": " -> ".join(str(loc) for loc in err.get("loc", [])),
+                "issue": err.get("msg", "Invalid value"),
+                "type": err.get("type", "value_error"),
+            }
+            for err in exc.errors()
+        ]
+        payload = ErrorResponse(
+            error_code="VALIDATION_ERROR",
+            message="Request input validation failed.",
+            details=sanitized_details,
+        )
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content=payload.model_dump(mode="json"),
+        )
+
+    @app.exception_handler(Exception)
+    async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+        logger.error("Unhandled server exception on %s: %s", request.url.path, exc.__class__.__name__, exc_info=True)
+        payload = ErrorResponse(
+            error_code="INTERNAL_SERVER_ERROR",
+            message="An unexpected internal error occurred. Please contact the administrator.",
+        )
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content=payload.model_dump(mode="json"),
+        )
+
+    # Include API v1 router
+    app.include_router(api_v1_router, prefix=settings.API_V1_PREFIX)
+
+    @app.get(
+        "/health",
+        response_model=HealthResponse,
+        include_in_schema=False,
+    )
+    def root_health() -> HealthResponse:
+        return HealthResponse(
+            status="healthy",
+            app_name=settings.APP_NAME,
+            version=settings.APP_VERSION,
+            environment=settings.APP_ENV,
+        )
+
+    @app.get("/", include_in_schema=False)
+    def root() -> dict[str, str]:
+        return {
+            "app": settings.APP_NAME,
+            "version": settings.APP_VERSION,
+            "status": "online",
+        }
+
+    return app
+
+
+app = create_app()

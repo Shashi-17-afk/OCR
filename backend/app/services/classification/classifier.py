@@ -19,43 +19,50 @@ class TirunelveliPageClassifier:
 
     # Primary anchors with positive weights
     INVOICE_ANCHORS = [
-        (r"tax invoice\s*[-–]?\s*transport copy", 5.0),
-        (r"tax invoice", 2.0),
-        (r"seshasayee paper and boards", 3.0),
-        (r"net claim rs", 4.0),
-        (r"add:\s*frie?ght", 4.0),
-        (r"transport copy", 3.0),
-        (r"bill to", 1.5),
-        (r"ship to", 1.5),
-        (r"gross wt|gross weight", 2.0),
+        (r"tax\s*invoice\s*[-–]?\s*transport\s*copy", 6.0),
+        (r"tax\s*invoice", 4.0),
+        (r"original\s*(?:for\s*)?transporter", 4.0),
+        (r"seshasayee\s*paper\s*and\s*boards", 3.0),
+        (r"invoice\s*(?:no|number|\.)|document\s*no", 3.0),
+        (r"net\s*claim\s*rs|taxable\s*value", 3.5),
+        (r"add:\s*frie?ght|freight\s*(?:amount)?", 3.5),
+        (r"transport\s*copy", 3.0),
+        (r"bill\s*to", 2.0),
+        (r"ship\s*to", 2.0),
+        (r"gross\s*(?:wt|weight)", 2.5),
+        (r"goods\s*details|description\s*of\s*goods", 2.0),
     ]
 
     EWAY_ANCHORS = [
-        (r"e-?way bill system", 5.0),
-        (r"e-?way bill", 3.0),
-        (r"valid upto|valid until|valid from", 4.0),
-        (r"transporter doc\.?\s*no", 4.0),
-        (r"government of india", 3.0),
-        (r"\b\d{12}\b", 3.0),  # 12-digit e-way bill number
+        (r"electronic\s*way\s*bill|e-?way\s*bill\s*system", 6.0),
+        (r"e-?way\s*bill\s*number", 5.0),
+        (r"\be-?way\s*bill\b", 3.0),
+        (r"valid\s*(?:upto|until|from)", 4.0),
+        (r"transporter\s*doc\.?\s*no|lr\s*/?\s*transporter\s*doc", 4.0),
+        (r"approx(?:\.|\s)*distance", 4.0),
+        (r"government\s*of\s*india", 3.0),
+        (r"\b\d{12}\b", 2.0),  # 12-digit e-way bill number
     ]
 
     SECURITY_ANCHORS = [
-        (r"security copy", 6.0),
-        (r"gate sheet", 4.0),
-        (r"seshasayee paper.*security copy", 6.0),
+        (r"security\s*copy", 6.0),
+        (r"gate\s*sheet", 4.0),
+        (r"seshasayee\s*paper.*security\s*copy", 6.0),
         (r"lorry\s*no\s*:", 3.0),
-        (r"transporter name\s*:\s*ct logistics", 4.0),
+        (r"transporter\s*name\s*:\s*ct\s*logistics", 4.0),
     ]
 
     LR_ANCHORS = [
-        (r"ct logistics solutions", 4.0),
-        (r"lorry receipt|consignment note", 4.0),
-        (r"to be billed\s*/?\s*unloading by consignee", 5.0),
-        (r"consignor['’]?s? name", 3.0),
-        (r"consignee['’]?s? name", 3.0),
-        (r"truck number|vehicle number", 1.5),
-        (r"delivery at\s*/?\s*to", 2.5),
-        (r"description of goods", 2.0),
+        (r"ct\s*logistics\s*solutions", 4.0),
+        (r"lorry\s*receipt|consignment\s*note", 5.0),
+        (r"lr\s*(?:no|number|\.)|document\s*no[:\s]*lr-", 4.5),
+        (r"to\s*be\s*billed", 4.0),
+        (r"consignor(?:['’]?s?\s*name)?", 3.0),
+        (r"consignee(?:['’]?s?\s*name)?", 3.0),
+        (r"truck\s*(?:number|no|\/)?|vehicle\s*(?:number|no)", 3.0),
+        (r"delivery\s*(?:place|at(?:\s*/?\s*to)?|destination)", 3.0),
+        (r"description\s*of\s*goods|consignment\s*summary", 2.5),
+        (r"loading\s*point", 2.5),
     ]
 
     @classmethod
@@ -134,6 +141,17 @@ class TirunelveliPageClassifier:
 
         # Check for ambiguity (runner up too close to top score)
         is_ambiguous = (top_score - runner_up_score) < 2.0 and runner_up_score > 3.0
+
+        # Note: Material invoices frequently cite the E-Way bill number (e.g. "E-Way Bill No: 331084729101").
+        # If the page has definitive invoice titles ("tax invoice" or "original for transporter")
+        # and lacks E-Way bill printout headers ("electronic way bill" / "valid upto"),
+        # do not treat the EWB cross-reference as a document conflict.
+        if is_ambiguous and top_type == PageClassificationType.MATERIAL_INVOICE and runner_up_type == PageClassificationType.EWAY_BILL:
+            has_inv_title = bool(re.search(r"tax\s*invoice|original\s*(?:for\s*)?transporter", cleaned_text))
+            has_ewb_title = bool(re.search(r"electronic\s*way\s*bill|e-?way\s*bill\s*system|valid\s*(?:upto|until)", cleaned_text))
+            if has_inv_title and not has_ewb_title:
+                is_ambiguous = False
+
         review_reason = (
             f"Conflicting document markers between {top_type.value} and {runner_up_type.value}"
             if is_ambiguous

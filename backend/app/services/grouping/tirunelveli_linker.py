@@ -55,6 +55,7 @@ class TirunelveliDocumentLinker:
         # ---------------------------------------------------------
         truck_groups: dict[tuple[str, str], list[TirunelveliPageExtractionResult]] = {}
         ewb_deferred_pages: list[TirunelveliPageExtractionResult] = []
+        inv_deferred_pages: list[TirunelveliPageExtractionResult] = []
 
         for p in pages:
             if p.classification.classification == PageClassificationType.EWAY_BILL:
@@ -65,17 +66,80 @@ class TirunelveliDocumentLinker:
             truck_plate, date_str, reason = cls._extract_truck_and_date(p)
 
             if not truck_plate or not date_str:
-                page_accounting[p.page_number] = "unassigned"
-                unassigned_pool.append(
-                    UnassignedPage(
-                        page_number=p.page_number,
-                        page_result=p,
-                        unassigned_reason=reason or "Missing identifiable truck number or pickup date",
+                if p.classification.classification == PageClassificationType.MATERIAL_INVOICE:
+                    # Invoices may not declare the truck plate on the invoice page (assigned at gate on LR/EWB)
+                    # Defer linking until truck groups are established by LR / Security Copy
+                    inv_deferred_pages.append(p)
+                else:
+                    page_accounting[p.page_number] = "unassigned"
+                    unassigned_pool.append(
+                        UnassignedPage(
+                            page_number=p.page_number,
+                            page_result=p,
+                            unassigned_reason=reason or "Missing identifiable truck number or pickup date",
+                        )
                     )
-                )
             else:
                 key = (truck_plate, date_str)
                 truck_groups.setdefault(key, []).append(p)
+
+        # Associate deferred Material Invoices to their truck group via printed LR or LR invoice list
+        for inv_p in inv_deferred_pages:
+            inv_data = inv_p.invoice_data
+            inv_lr_norm = (
+                inv_data.printed_lr_number.normalized_value
+                if (inv_data and inv_data.printed_lr_number)
+                else None
+            )
+            inv_no = (
+                inv_data.invoice_number.value
+                if (inv_data and inv_data.invoice_number)
+                else None
+            )
+
+            matched_key = None
+            # 1. Match by printed LR number on invoice
+            if inv_lr_norm:
+                matching_keys = [
+                    k for k, g_pages in truck_groups.items()
+                    if any(
+                        p.lr_data and p.lr_data.lr_number.normalized_value == inv_lr_norm
+                        for p in g_pages
+                    )
+                ]
+                if len(matching_keys) == 1:
+                    matched_key = matching_keys[0]
+
+            # 2. Match by LR expanded invoice list
+            if not matched_key and inv_no:
+                matching_keys = [
+                    k for k, g_pages in truck_groups.items()
+                    if any(
+                        p.lr_data
+                        and p.lr_data.invoice_numbers_raw.value
+                        and inv_no in InvoiceRangeExpander.expand(p.lr_data.invoice_numbers_raw.value).expanded_numbers
+                        for p in g_pages
+                    )
+                ]
+                if len(matching_keys) == 1:
+                    matched_key = matching_keys[0]
+
+            # 3. Direct booking with single truck group fallback
+            if not matched_key and len(truck_groups) == 1:
+                single_key = list(truck_groups.keys())[0]
+                matched_key = single_key
+
+            if matched_key:
+                truck_groups[matched_key].append(inv_p)
+            else:
+                page_accounting[inv_p.page_number] = "unassigned"
+                unassigned_pool.append(
+                    UnassignedPage(
+                        page_number=inv_p.page_number,
+                        page_result=inv_p,
+                        unassigned_reason=f"Page {inv_p.page_number}: Missing truck number on invoice (did not match any LR or truck dossier)",
+                    )
+                )
 
         # Associate deferred E-way bills to their truck group by vehicle number and Transporter Doc No
         for ewb_p in ewb_deferred_pages:
@@ -406,9 +470,22 @@ class TirunelveliDocumentLinker:
                     if len(c_matches) == 1:
                         matched_c = c_matches[0]
 
-                # Match against invoices via 12-digit E-Way Bill Number
+                # Match against invoices via 12-digit E-Way Bill Number across consignments
                 matched_inv_no = None
-                if matched_c:
+                if not matched_c:
+                    for c in consignments:
+                        for inv_link in c.invoices:
+                            if (
+                                inv_link.invoice.eway_bill_number
+                                and inv_link.invoice.eway_bill_number.value == ewb_no
+                            ):
+                                matched_c = c
+                                matched_inv_no = inv_link.invoice_number
+                                break
+                        if matched_c:
+                            break
+
+                if matched_c and not matched_inv_no:
                     for inv_link in matched_c.invoices:
                         if (
                             inv_link.invoice.eway_bill_number
@@ -416,6 +493,9 @@ class TirunelveliDocumentLinker:
                         ):
                             matched_inv_no = inv_link.invoice_number
                             break
+
+                if not matched_c and len(consignments) == 1:
+                    matched_c = consignments[0]
 
                 if matched_c:
                     evidence = [LinkEvidenceType.TRUCK_AND_DATE_MATCH]

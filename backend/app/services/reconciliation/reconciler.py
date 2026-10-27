@@ -213,7 +213,7 @@ class TirunelveliReconciliationEngine:
         # Check for split freight cues
         for inv in canonical_invoices:
             raw_text = (inv.freight_amount.raw_text or "").lower()
-            if "split" in raw_text or "part" in raw_text:
+            if re.search(r"\bsplit\b|\bpart(?:\s+pay|\s+freight|\b(?!\s*freight\)))", raw_text):
                 is_split_freight = True
                 audit_notes.append("SPLIT_FREIGHT_REQUIRES_STAFF_REVIEW: Do not apply the zero freight rule")
 
@@ -227,13 +227,12 @@ class TirunelveliReconciliationEngine:
         consignee = lr_rec.consignee.value if (lr_rec and lr_rec.consignee) else ""
         bill_to = canonical_invoices[0].bill_to_party.value if canonical_invoices else consignee
 
-        # Check if Bill-To differs from delivery destination / consignee
+        # Check if Bill-To differs from delivery destination (PRD §5.4)
         bill_to_differs = False
         if bill_to and del_place:
             clean_b = re.sub(r"[\s,\.\-]+", "", bill_to.lower())
             clean_d = re.sub(r"[\s,\.\-]+", "", del_place.lower())
-            clean_c = re.sub(r"[\s,\.\-]+", "", consignee.lower())
-            if clean_b not in clean_d and clean_b not in clean_c and clean_d not in clean_b:
+            if clean_b not in clean_d and clean_d not in clean_b:
                 bill_to_differs = True
                 audit_notes.append(
                     f"BILL_TO_DIFFERS_FROM_DELIVERY: Bill-To '{bill_to}' differs from delivery place '{del_place}' (staff set Bill To in TMS per PRD §5.4)"
@@ -304,6 +303,8 @@ class TirunelveliReconciliationEngine:
             duplicate_invoice_pages_detected=has_duplicates,
             packages_summary=pkg_str,
             total_packages=total_packs,
+            invoice_pages=sorted(set(inv_link.source_page for inv_link in consignment.invoices)),
+            eway_bill_pages=sorted(set(ewb_link.source_page for ewb_link in consignment.eway_bills)),
             governing_weight_kg=gov_gross_kg,
             governing_weight_mt=gov_gross_mt,
             lr_crosscheck_weight_kg=lr_weight_kg,

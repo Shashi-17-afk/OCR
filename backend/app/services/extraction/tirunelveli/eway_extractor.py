@@ -61,24 +61,36 @@ class EwayBillExtractor:
 
         # 3. Transporter Doc No (corresponds to LR number)
         doc_match = re.search(
-            r"(?:trans(?:porter)?\s*doc(?:ument)?\.?\s*no\.?[:\s]*|\bdoc\s*no\.?[:\s]*)([A-Z0-9\-/]+)",
+            r"(?:lr\s*/?\s*trans(?:porter)?\s*doc(?:ument)?\.?\s*no\.?|trans(?:porter)?\s*doc(?:ument)?\.?\s*no\.?|\bdoc\s*no\.?[:\s]*)[:\s]*[\r\n\s]*([A-Z0-9\-/]+)",
             text,
             re.IGNORECASE,
         )
+        doc_raw = None
+        if doc_match:
+            candidate = doc_match.group(1).strip()
+            if not re.search(r"\d{2}[-/\.]\d{2}[-/\.]\d{2,4}", candidate):
+                doc_raw = candidate
+
+        if not doc_raw:
+            # Fallback: look for 5-6 digit LR starting with 0 on EWB page (e.g. 019427)
+            lr_candidate = re.search(r"\b(0\d{5})\b", text)
+            if lr_candidate:
+                doc_raw = lr_candidate.group(1)
+
         lr_field = (
             LRNormalizer.normalize(
-                raw_text=doc_match.group(1),
+                raw_text=doc_raw,
                 source_page=page_number,
                 confidence=0.95,
                 bounding_box=find_box(r"trans.*doc"),
             )
-            if doc_match
+            if doc_raw
             else None
         )
 
         # 4. Vehicle Number
         veh_match = re.search(
-            r"(?:vehicle\s*no\.?[:\s]*|\b)([A-Z]{2}\s*\d{2}\s*[A-Z]{1,2}\s*\d{4})\b",
+            r"(?:vehicle\s*(?:number|no)?\.?[:\s]*|\b)([A-Z]{2}\s*\d{1,2}\s*[A-Z]{1,2}\s*\d{4})\b",
             text,
             re.IGNORECASE,
         )
@@ -88,7 +100,7 @@ class EwayBillExtractor:
                 value=veh_clean,
                 raw_text=veh_match.group(0),
                 confidence=0.96,
-                bounding_box=find_box(r"[A-Z]{2}\s*\d{2}\s*[A-Z]{1,2}\s*\d{4}"),
+                bounding_box=find_box(r"[A-Z]{2}\s*\d{1,2}\s*[A-Z]{1,2}\s*\d{4}"),
                 source_page=page_number,
             )
             if veh_clean

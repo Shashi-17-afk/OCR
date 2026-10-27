@@ -129,7 +129,7 @@ class LorryReceiptExtractor:
 
         # 6. Delivery Place / Unloading Point
         del_match = re.search(
-            r"(?:delivery\s*at(?:\s*/?\s*to)?|unloading\s*point)[:\s]*([^\n]+)",
+            r"(?:delivery\s*(?:place|at(?:\s*/?\s*to)?|destination)|unloading\s*point)[:\s]*[\r\n\s]*([^\n]+)",
             text,
             re.IGNORECASE,
         )
@@ -147,7 +147,14 @@ class LorryReceiptExtractor:
             text,
             re.IGNORECASE,
         )
-        pkg_str = pkg_match.group(1).strip() if pkg_match else "0 packages"
+        pkg_str = pkg_match.group(1).strip() if (pkg_match and pkg_match.group(1).strip()) else ""
+        if not pkg_str or pkg_str == "0 packages":
+            tbl_pkg = re.search(r"CONSIGNMENT\s*SUMMARY[\s\S]*?(?:Packages|Gross\s*Wt)[\s\S]*?(\d+)\s+([\d,]+\.\d{2})", text, re.IGNORECASE)
+            if tbl_pkg:
+                pkg_str = f"{tbl_pkg.group(1)} packages"
+            else:
+                pkg_str = "0 packages"
+
         pkg_field = ExtractedField[str](
             value=pkg_str,
             raw_text=pkg_match.group(0) if pkg_match else None,
@@ -157,24 +164,34 @@ class LorryReceiptExtractor:
 
         # 8. LR Weight (kg) - Strictly Cross-Check Weight per PRD
         wt_match = re.search(
-            r"(?:weight|weight\s*in\s*kgs?)[:\s]*([\d\.,]+)",
+            r"(?:gross\s*wt(?:\(kg\))?|weight(?:\s*in\s*kgs?)?)[:\s]*[\r\n\s]*(\d+[\d,]*\.?\d*)",
             text,
             re.IGNORECASE,
         )
-        lr_wt = (
-            float(wt_match.group(1).replace(",", ""))
-            if wt_match
-            else 0.0
-        )
+        lr_wt = 0.0
+        if wt_match and wt_match.group(1):
+            try:
+                lr_wt = float(wt_match.group(1).replace(",", ""))
+            except ValueError:
+                lr_wt = 0.0
+
+        if lr_wt == 0.0:
+            tbl_wt = re.search(r"\b(\d{4,6}\.\d{2})\b", text)
+            if tbl_wt:
+                try:
+                    lr_wt = float(tbl_wt.group(1).replace(",", ""))
+                except ValueError:
+                    lr_wt = 0.0
+
         wt_field = ExtractedField[float](
             value=lr_wt,
             raw_text=wt_match.group(0) if wt_match else None,
-            confidence=0.90 if wt_match else 0.30,
+            confidence=0.90 if lr_wt > 0.0 else 0.30,
             source_page=page_number,
             flag_reason="LR weight is a cross-check only; invoice weight governs (PRD §2)",
         )
 
-        # 9. Invoice Numbers (handwritten reference string, e.g. "Inv: 2250601397 to 1400" or "2250501854 to 56")
+        # 9. Invoice Numbers (handwritten reference string, e.g. "Inv: 2250601397 to 1400" or "2250601397-1400")
         inv_ref_match = re.search(
             r"(?:inv(?:oices?)?[:\s]*|inv(?:oice)?\s*nos?\.?[:\s]*)([^\r\n]+)",
             text,
@@ -186,10 +203,16 @@ class LorryReceiptExtractor:
             # Strip trailing preprinted boilerplate if on same line
             raw_inv_line = re.split(r"\bto\s+be\s+billed\b", raw_inv_line, flags=re.IGNORECASE)[0].strip()
             inv_ref_str = raw_inv_line
+
+        if not inv_ref_str or not any(c.isdigit() for c in inv_ref_str):
+            direct_range = re.search(r"\b(225\d{7}(?:\s*(?:to|-|–)\s*(?:225\d{7}|\d{2,4}))?)\b", text)
+            if direct_range:
+                inv_ref_str = direct_range.group(1).strip()
+
         inv_ref_field = ExtractedField[str](
             value=inv_ref_str,
             raw_text=inv_ref_match.group(0) if inv_ref_match else None,
-            confidence=0.90 if inv_ref_match else 0.40,
+            confidence=0.90 if inv_ref_str else 0.40,
             source_page=page_number,
             is_ambiguous=not inv_ref_str,
             flag_reason="No invoice reference found on LR" if not inv_ref_str else None,
@@ -197,15 +220,19 @@ class LorryReceiptExtractor:
 
         # 10. Value
         val_match = re.search(
-            r"(?:value|total\s*value)[:\s]*([\d\.,]+)",
+            r"(?:declared\s*value(?:\s*\(rs\))?|total\s*value|value)[^\d\n]*[\r\n\s]*([\d,]+\.?\d*)",
             text,
             re.IGNORECASE,
         )
-        val_num = (
-            float(val_match.group(1).replace(",", ""))
-            if val_match
-            else None
-        )
+        val_num = None
+        if val_match and val_match.group(1):
+            try:
+                candidate = float(val_match.group(1).replace(",", ""))
+                if candidate > 0.0:
+                    val_num = candidate
+            except ValueError:
+                val_num = None
+
         val_field = (
             ExtractedField[float](
                 value=val_num,

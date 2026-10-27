@@ -48,6 +48,12 @@ class ConsignmentReconciliation(BaseModel):
         default=False,
         description="True if same invoice number appeared on multiple physical pages",
     )
+    invoice_pages: list[int] = Field(
+        default_factory=list, description="Source page numbers of invoices linked to this LR"
+    )
+    eway_bill_pages: list[int] = Field(
+        default_factory=list, description="Source page numbers of E-Way Bills linked to this LR"
+    )
 
     # Packages & Cargo (PRD §4)
     packages_summary: str = Field(

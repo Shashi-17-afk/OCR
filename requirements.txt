@@ -2,6 +2,9 @@ fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 pydantic>=2.8.0
 pydantic-settings>=2.4.0
+pymupdf>=2.0.0
+python-multipart>=0.0.20
+pillow>=11.0.0
 
 # Testing dependencies
 pytest>=8.3.0

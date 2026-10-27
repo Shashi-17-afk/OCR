@@ -13,6 +13,14 @@ class Settings(BaseSettings):
     PORT: int = 8000
     LOG_LEVEL: str = "INFO"
 
+    # Ingestion & Validation Limits
+    MAX_FILE_SIZE_BYTES: int = 25 * 1024 * 1024  # 25 MB
+    MIN_FILE_SIZE_BYTES: int = 16  # Bytes
+    MAX_PDF_PAGES: int = 50
+    MIN_TEXT_CHARS_PER_PAGE: int = 40
+    MAX_IMAGE_DIMENSION_PX: int = 10000
+    ALLOWED_EXTENSIONS: list[str] = ["pdf", "png", "jpg", "jpeg"]
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

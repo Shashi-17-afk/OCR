@@ -1,8 +1,11 @@
+import os
+from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend.app.api.v1.router import api_v1_router
@@ -94,8 +97,20 @@ def create_app() -> FastAPI:
             environment=settings.APP_ENV,
         )
 
+    # Static files and Web UI
+    frontend_dir = (Path(__file__).resolve().parent.parent.parent / "frontend").resolve()
+    if frontend_dir.exists():
+        app.mount("/static", StaticFiles(directory=str(frontend_dir)), name="static")
+
+        @app.get("/ui", include_in_schema=False)
+        def ui_page() -> FileResponse:
+            return FileResponse(str(frontend_dir / "index.html"), media_type="text/html")
+
     @app.get("/", include_in_schema=False)
-    def root() -> dict[str, str]:
+    def root(request: Request):
+        accept = request.headers.get("accept", "")
+        if frontend_dir.exists() and "text/html" in accept:
+            return FileResponse(str(frontend_dir / "index.html"), media_type="text/html")
         return {
             "app": settings.APP_NAME,
             "version": settings.APP_VERSION,

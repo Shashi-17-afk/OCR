@@ -261,6 +261,7 @@ async def reconcile_tirunelveli_document(
         )
         hierarchy_resp = TirunelveliDocumentLinker.link_documents(extraction_resp)
         reconciled_resp = TirunelveliReconciliationEngine.reconcile(hierarchy_resp)
+        reconciled_resp.page_extractions = extraction_resp.pages
         return reconciled_resp
 
     except EmptyFileError as err:

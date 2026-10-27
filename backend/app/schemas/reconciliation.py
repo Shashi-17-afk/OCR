@@ -3,6 +3,7 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 from backend.app.schemas.classification import BookingType, LoadingPoint
+from backend.app.schemas.extraction import TirunelveliPageExtractionResult
 from backend.app.schemas.hierarchy import UnassignedPage
 
 
@@ -177,4 +178,7 @@ class TirunelveliReconciliationResponse(BaseModel):
     )
     global_reconciliation_flags: list[str] = Field(
         default_factory=list, description="Document-level reconciliation notices"
+    )
+    page_extractions: list[TirunelveliPageExtractionResult] = Field(
+        default_factory=list, description="Raw per-page extractions for UI review and verification"
     )

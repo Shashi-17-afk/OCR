@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CTLS Logistics Booking OCR & Reconciliation</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+
+  <!-- App Header -->
+  <header class="app-header">
+    <div class="brand-wrapper">
+      <div class="brand-icon">
+        <svg viewBox="0 0 24 24">
+          <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 14l-5-5 1.41-1.41L12 14.17l7.59-7.59L21 8l-9 9z"/>
+        </svg>
+      </div>
+      <div class="brand-text">
+        <h1>CTLS Booking OCR & Reconciliation</h1>
+        <p>Tirunelveli Document Ingestion & Verification Engine</p>
+      </div>
+    </div>
+    <div class="header-badges">
+      <span class="badge badge-airgap">
+        <span class="badge-dot"></span>
+        100% Air-Gapped Local Processing
+      </span>
+      <span class="badge badge-version">v0.1.0-tirunelveli</span>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main class="main-content">
+
+    <!-- View 1: Ingestion & Setup Screen -->
+    <section id="ingestSection" class="ingest-screen">
+      <div class="ingest-header">
+        <h2>Document Bundle Processing</h2>
+        <p>Select booking configuration and upload multi-page consignment PDF or scanned images.</p>
+      </div>
+
+      <!-- Configuration Card -->
+      <div class="glass-card">
+        <h3 class="card-title">
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="2">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+          </svg>
+          1. Booking Parameters
+        </h3>
+        <div class="config-grid">
+          <div class="form-group">
+            <label class="form-label" for="loadingPointSelect">Loading Point</label>
+            <select id="loadingPointSelect" class="form-select">
+              <option value="tirunelveli" selected>Tirunelveli (Active Milestone)</option>
+              <option value="erode" disabled>Erode (Phase 2 Milestone)</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Booking Type</label>
+            <div class="radio-group" id="bookingTypeToggle">
+              <div class="radio-btn active" data-value="direct">Direct Booking (1 LR)</div>
+              <div class="radio-btn" data-value="group">Group Booking (Multi-LR)</div>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Local OCR Engine</label>
+            <div class="toggle-switch-wrapper">
+              <div class="toggle-label">
+                <span>ONNX RapidOCR</span>
+                <span class="toggle-subtext">Scan detection & deskewing</span>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="ocrToggle" checked>
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Upload Dropzone Card -->
+      <div class="glass-card">
+        <h3 class="card-title">
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="17 8 12 3 7 8"></polyline>
+            <line x1="12" y1="3" x2="12" y2="15"></line>
+          </svg>
+          2. Document Upload
+        </h3>
+
+        <div id="dropzone" class="dropzone">
+          <div class="dropzone-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke-width="2">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+              <polyline points="14 2 14 8 20 8"></polyline>
+              <line x1="12" y1="18" x2="12" y2="12"></line>
+              <line x1="9" y1="15" x2="15" y2="15"></line>
+            </svg>
+          </div>
+          <p class="dropzone-prompt">Drag & drop consignment PDF or document images here</p>
+          <p class="dropzone-subtext">Supports multi-page PDF, PNG, and JPEG (up to 25 MB)</p>
+          <button type="button" class="btn btn-secondary" id="browseBtn">Browse Local Files</button>
+          <input type="file" id="fileInput" accept=".pdf, .png, .jpg, .jpeg" style="display: none;">
+        </div>
+
+        <div id="selectedFileInfo" class="selected-file-info" style="display: none;">
+          <div class="file-meta">
+            <div class="file-icon">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
+                <polyline points="13 2 13 9 20 9"></polyline>
+              </svg>
+            </div>
+            <div>
+              <div id="fileNameDisplay" class="file-name">filename.pdf</div>
+              <div id="fileSizeDisplay" class="file-size">0 KB</div>
+            </div>
+          </div>
+          <button type="button" class="btn btn-secondary" id="changeFileBtn">Change</button>
+        </div>
+
+        <div style="margin-top: 1.5rem;">
+          <button type="button" class="btn btn-primary btn-lg" id="startProcessBtn" disabled>
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="5 3 19 12 5 21 5 3"></polygon>
+            </svg>
+            Start Extraction & Verification
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- View 2: Split Review & Verification Screen -->
+    <section id="reviewSection" class="review-screen" style="display: none;">
+      <!-- Toolbar -->
+      <div class="review-toolbar">
+        <div class="summary-badges">
+          <button type="button" class="btn btn-secondary" id="backToUploadBtn" style="padding: 0.35rem 0.75rem; font-size: 0.8rem;">
+            ← Upload New
+          </button>
+          <div class="summary-pill">
+            <span>Doc:</span>
+            <strong id="barDocName">bundle.pdf</strong>
+          </div>
+          <div class="summary-pill">
+            <span>Truck:</span>
+            <strong id="barTruckPlate">TN52Y7426</strong>
+          </div>
+          <div class="summary-pill">
+            <span>Accounting:</span>
+            <strong id="barPageConservation" style="color: var(--success);">9/9 Conserved</strong>
+          </div>
+          <div id="barStatusBadge" class="badge-status badge-status-confirmed">CONFIRMED</div>
+        </div>
+
+        <div class="toolbar-actions">
+          <button type="button" class="btn btn-secondary" id="recalcBtn">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+            </svg>
+            Recalculate
+          </button>
+          <button type="button" class="btn btn-success" id="exportExcelBtn">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="7 10 12 15 17 10"></polyline>
+              <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+            Approve & Export Excel (.xlsx)
+          </button>
+        </div>
+      </div>
+
+      <!-- Split Workspace -->
+      <div class="split-workspace">
+        
+        <!-- Left Pane: Document Viewer -->
+        <div class="left-pane">
+          <div class="pane-header">
+            <div class="page-navigator">
+              <button type="button" class="nav-btn" id="prevPageBtn" title="Previous Page">‹</button>
+              <span id="pageIndicator" class="page-indicator">Page 1 of 9</span>
+              <button type="button" class="nav-btn" id="nextPageBtn" title="Next Page">›</button>
+            </div>
+            <div id="pageClassBadge" class="page-class-badge class-invoice">MATERIAL_INVOICE (98%)</div>
+          </div>
+
+          <div class="doc-viewer-container" id="docViewerContainer">
+            <!-- Rendered iframe for PDF or img for image -->
+            <iframe id="pdfFrame" class="doc-viewer-iframe" src="about:blank"></iframe>
+            <img id="imageViewer" class="doc-viewer-img" style="display: none;" src="" alt="Document page preview">
+          </div>
+
+          <!-- Bottom Thumbnail Carousel -->
+          <div class="thumbnail-bar" id="thumbnailBar">
+            <!-- Dynamically populated page chips -->
+          </div>
+        </div>
+
+        <!-- Right Pane: Extracted Fields & Reconciliation -->
+        <div class="right-pane">
+          <div class="pane-tabs">
+            <button type="button" class="tab-btn active" data-tab="tabConsignments">
+              🚚 Consignments & Totals
+            </button>
+            <button type="button" class="tab-btn" data-tab="tabSelectedPage">
+              📄 Page Details (<span id="tabSelectedPageNum">1</span>)
+            </button>
+            <button type="button" class="tab-btn" data-tab="tabDiscrepancies">
+              ⚠️ Review Flags (<span id="tabDiscrepancyCount">0</span>)
+            </button>
+            <button type="button" class="tab-btn" data-tab="tabAccounting">
+              📊 Page Accounting
+            </button>
+          </div>
+
+          <!-- Tab 1: Consignments & Totals -->
+          <div class="tab-content" id="tabConsignments">
+            <!-- Aggregated Trip Totals -->
+            <div class="totals-summary-card">
+              <div class="card-title" style="margin-bottom: 0.75rem;">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="1" y="3" width="15" height="13"></rect>
+                  <polygon points="16 8 20 8 23 11 23 16 16 16 16 8"></polygon>
+                  <circle cx="5.5" cy="18.5" r="2.5"></circle>
+                  <circle cx="18.5" cy="18.5" r="2.5"></circle>
+                </svg>
+                Truck Trip Aggregated Totals
+              </div>
+              <div class="totals-grid">
+                <div class="total-metric">
+                  <span class="metric-label">Governing Gross Wt</span>
+                  <span id="metricGrossWeight" class="metric-val">17.451 MT</span>
+                  <span id="metricGrossKg" class="metric-sub">17,450.60 kg</span>
+                </div>
+                <div class="total-metric">
+                  <span class="metric-label">Total Packages</span>
+                  <span id="metricPackages" class="metric-val">340</span>
+                  <span id="metricGateSheetTie" class="metric-sub" style="color: var(--success);">Security Copy: N/A</span>
+                </div>
+                <div class="total-metric">
+                  <span class="metric-label">Consignment Value</span>
+                  <span id="metricTotalValue" class="metric-val">₹1,346,779</span>
+                  <span class="metric-sub">Sum of invoices</span>
+                </div>
+                <div class="total-metric">
+                  <span class="metric-label">Freight Charge</span>
+                  <span id="metricFreight" class="metric-val">₹0.00</span>
+                  <span id="metricFreightMode" class="metric-sub">Party Freight</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Dynamic Reconciled Consignments List -->
+            <div id="consignmentsContainer">
+              <!-- Rendered via JS -->
+            </div>
+          </div>
+
+          <!-- Tab 2: Page Details -->
+          <div class="tab-content" id="tabSelectedPage" style="display: none;">
+            <div id="selectedPageContent">
+              <!-- Rendered via JS for current active page -->
+            </div>
+          </div>
+
+          <!-- Tab 3: Discrepancies & Notices -->
+          <div class="tab-content" id="tabDiscrepancies" style="display: none;">
+            <div class="card-title">Audit Notes & Manual Review Notices</div>
+            <div id="discrepanciesContainer" class="banner-list">
+              <!-- Rendered via JS -->
+            </div>
+          </div>
+
+          <!-- Tab 4: Page Accounting -->
+          <div class="tab-content" id="tabAccounting" style="display: none;">
+            <div class="card-title">Strict Page Conservation & Provenance</div>
+            <div id="accountingSummary" style="margin-bottom: 1rem;">
+              <!-- Rendered via JS -->
+            </div>
+            <div id="unassignedPoolContainer">
+              <!-- Rendered via JS -->
+            </div>
+          </div>
+
+          <!-- Sticky Action Bar -->
+          <div class="action-footer">
+            <span id="footerStatusText" style="font-size: 0.8rem; color: var(--text-secondary);">
+              Review extracted values and verify discrepancies before Excel generation.
+            </span>
+            <button type="button" class="btn btn-success" id="footerExportBtn">
+              Download Reconciled Excel (.xlsx)
+            </button>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Processing Modal Overlay -->
+  <div id="processingOverlay" class="processing-overlay" style="display: none;">
+    <div class="processing-card">
+      <div class="spinner"></div>
+      <div id="processingTitle" class="processing-title">Analyzing Documents</div>
+      <div id="processingStep" class="processing-step">Running local ONNX RapidOCR over pages...</div>
+      <div class="progress-track">
+        <div class="progress-bar"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

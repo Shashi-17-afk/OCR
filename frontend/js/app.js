@@ -48,6 +48,7 @@
     recalcBtn: document.getElementById('recalcBtn'),
     exportExcelBtn: document.getElementById('exportExcelBtn'),
     footerExportBtn: document.getElementById('footerExportBtn'),
+    footerStatusText: document.getElementById('footerStatusText'),
 
     // Left Pane (Document Viewer)
     prevPageBtn: document.getElementById('prevPageBtn'),
@@ -843,8 +844,14 @@
       state.reconciliationData.truck_dossiers[0].reconciled_consignments = state.workingConsignments;
     }
 
-    elements.footerExportBtn.disabled = true;
-    elements.footerExportBtn.textContent = 'Generating Excel...';
+    if (elements.footerExportBtn) {
+      elements.footerExportBtn.disabled = true;
+      elements.footerExportBtn.textContent = 'Generating Excel...';
+    }
+    if (elements.exportExcelBtn) {
+      elements.exportExcelBtn.disabled = true;
+      elements.exportExcelBtn.textContent = 'Generating...';
+    }
 
     try {
       const response = await fetch('/api/v1/bookings/tirunelveli/export-excel-from-reconciliation', {
@@ -880,13 +887,28 @@
       document.body.removeChild(a);
       URL.revokeObjectURL(downloadUrl);
 
-      elements.footerStatusText.textContent = `✓ Successfully exported ${filename}`;
-      elements.footerStatusText.style.color = 'var(--success)';
+      if (elements.footerStatusText) {
+        elements.footerStatusText.textContent = `✓ Successfully exported ${filename}`;
+        elements.footerStatusText.style.color = 'var(--success)';
+      }
     } catch (err) {
       alert(`Excel export failed: ${err.message}`);
     } finally {
-      elements.footerExportBtn.disabled = false;
-      elements.footerExportBtn.textContent = 'Download Reconciled Excel (.xlsx)';
+      if (elements.footerExportBtn) {
+        elements.footerExportBtn.disabled = false;
+        elements.footerExportBtn.textContent = 'Download Reconciled Excel (.xlsx)';
+      }
+      if (elements.exportExcelBtn) {
+        elements.exportExcelBtn.disabled = false;
+        elements.exportExcelBtn.innerHTML = `
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="7 10 12 15 17 10"></polyline>
+            <line x1="12" y1="15" x2="12" y2="3"></line>
+          </svg>
+          Approve & Export Excel (.xlsx)
+        `;
+      }
     }
   }
 

@@ -82,3 +82,21 @@ def test_ui_review_edit_and_export_flow():
     assert ws["D3"].value == "VERIFIED_CTLS_CLIENT_NAME"
     assert ws["E3"].value == "MADURAI_NORTH_HUB"
     assert ws["J3"].value == 350
+
+
+def test_ui_dom_element_bindings():
+    """Verifies that all DOM elements referenced in frontend/js/app.js exist in frontend/index.html
+    and that footerStatusText is properly bound.
+    """
+    resp_html = client.get("/ui")
+    assert resp_html.status_code == status.HTTP_200_OK
+    html_text = resp_html.text
+
+    resp_js = client.get("/static/js/app.js")
+    assert resp_js.status_code == status.HTTP_200_OK
+    js_text = resp_js.text
+
+    # Specifically check the element that caused the runtime error
+    assert "footerStatusText: document.getElementById('footerStatusText')" in js_text
+    assert 'id="footerStatusText"' in html_text
+

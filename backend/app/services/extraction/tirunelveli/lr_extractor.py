@@ -4,6 +4,7 @@ from typing import Optional
 from backend.app.schemas.document import OCRLineResult
 from backend.app.schemas.extraction import ExtractedField, LorryReceiptData
 from backend.app.services.extraction.tirunelveli.lr_normalizer import LRNormalizer
+from backend.app.services.extraction.tirunelveli.party_normalizer import PartyNameNormalizer
 
 
 class LorryReceiptExtractor:
@@ -98,7 +99,7 @@ class LorryReceiptExtractor:
             re.IGNORECASE,
         )
         consignor_str = (
-            consignor_match.group(1).strip()
+            PartyNameNormalizer.normalize(consignor_match.group(1).strip())
             if consignor_match
             else "SPB Ltd Tirunelveli"
         )
@@ -116,7 +117,7 @@ class LorryReceiptExtractor:
             re.IGNORECASE,
         )
         consignee_str = (
-            consignee_match.group(1).strip()
+            PartyNameNormalizer.normalize(consignee_match.group(1).strip())
             if consignee_match
             else "UNKNOWN_CONSIGNEE"
         )
@@ -133,7 +134,7 @@ class LorryReceiptExtractor:
             text,
             re.IGNORECASE,
         )
-        del_str = del_match.group(1).strip() if del_match else consignee_str
+        del_str = PartyNameNormalizer.normalize(del_match.group(1).strip()) if del_match else consignee_str
         del_field = ExtractedField[str](
             value=del_str,
             raw_text=del_match.group(0) if del_match else None,

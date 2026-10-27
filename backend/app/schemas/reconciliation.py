@@ -29,7 +29,12 @@ class ConsignmentReconciliation(BaseModel):
     # Destination & Parties (PRD §4 & §5.4)
     delivery_place: str = Field(description="Delivery destination / unloading point")
     consignee: str = Field(description="Consignee / Party name")
+    ship_to: str = Field(default="", description="Ship-To party name")
     bill_to: str = Field(description="Bill-To customer/dealer name")
+    bill_to_differs_from_ship_to: bool = Field(
+        default=False,
+        description="True if Bill-To party differs from Ship-To party per PRD §5.4",
+    )
     bill_to_differs_from_delivery: bool = Field(
         default=False,
         description="True if Bill-To party differs from delivery destination / consignee",

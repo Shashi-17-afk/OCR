@@ -164,9 +164,9 @@ class TirunelveliExcelExporter:
         {
             "id": "freight_amount",
             "header": "Freight (Rs)",
-            "width": 15,
+            "width": 16,
             "align": "right",
-            "format": "#,##0.00",
+            "format": '"₹"#,##0.00',
             "value": lambda c, d: round(float(c.freight_amount), 2),
         },
         {
@@ -180,15 +180,15 @@ class TirunelveliExcelExporter:
         {
             "id": "total_value_rs",
             "header": "Total Value (Rs)",
-            "width": 16,
+            "width": 18,
             "align": "right",
-            "format": "#,##0.00",
+            "format": '"₹"#,##0.00',
             "value": lambda c, d: round(float(c.total_value_rs), 2),
         },
         {
             "id": "eway_bills",
             "header": "E-Way Bill(s)",
-            "width": 32,
+            "width": 36,
             "align": "left",
             "format": "@",
             "value": lambda c, d: c.eway_bills_cell,
@@ -196,7 +196,7 @@ class TirunelveliExcelExporter:
         {
             "id": "eway_expiry",
             "header": "E-Way Expiry",
-            "width": 14,
+            "width": 20,
             "align": "center",
             "format": "@",
             "value": lambda c, d: c.eway_expiry_cell or "",
@@ -204,7 +204,7 @@ class TirunelveliExcelExporter:
         {
             "id": "status",
             "header": "Reconciliation Status",
-            "width": 26,
+            "width": 28,
             "align": "center",
             "format": "@",
             "value": lambda c, d: c.status.value,
@@ -212,7 +212,7 @@ class TirunelveliExcelExporter:
         {
             "id": "audit_notes",
             "header": "Audit / Review Notes",
-            "width": 45,
+            "width": 50,
             "align": "left",
             "format": "@",
             "value": lambda c, d: "; ".join(c.audit_notes),
@@ -220,10 +220,18 @@ class TirunelveliExcelExporter:
         {
             "id": "source_provenance",
             "header": "Source Provenance",
-            "width": 30,
+            "width": 32,
             "align": "left",
             "format": "@",
             "value": lambda c, d: f"LR: P{c.source_page}; Inv: {_format_page_ranges(c.invoice_pages)}; EWB: {_format_page_ranges(c.eway_bill_pages)}",
+        },
+        {
+            "id": "ship_to",
+            "header": "Ship To",
+            "width": 32,
+            "align": "left",
+            "format": "@",
+            "value": lambda c, d: c.ship_to,
         },
     ]
 
@@ -331,7 +339,7 @@ class TirunelveliExcelExporter:
                         cell.fill = row_fill
 
                     # Specific cell callouts
-                    if col["id"] == "bill_to" and c.bill_to_differs_from_delivery:
+                    if col["id"] == "bill_to" and (c.bill_to_differs_from_delivery or c.bill_to_differs_from_ship_to):
                         cell.fill = PatternFill(start_color=cls.FILL_HIGHLIGHT_CELL, end_color=cls.FILL_HIGHLIGHT_CELL, fill_type="solid")
                     elif col["id"] == "physical_pages_count" and c.duplicate_invoice_pages_detected:
                         cell.fill = PatternFill(start_color=cls.FILL_HIGHLIGHT_CELL, end_color=cls.FILL_HIGHLIGHT_CELL, fill_type="solid")
@@ -346,6 +354,16 @@ class TirunelveliExcelExporter:
 
         # Freeze panes so banner and headers stay visible on scroll
         ws.freeze_panes = "A3"
+        # Enable auto-filter on table headers
+        ws.auto_filter.ref = f"A2:{get_column_letter(num_cols)}{max(current_row - 1, 2)}"
+
+        # Professional print layout setup
+        ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
+        ws.page_setup.paperSize = ws.PAPERSIZE_A4
+        ws.page_setup.fitToWidth = 1
+        ws.page_setup.fitToHeight = 0
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+        ws.print_title_rows = "1:2"
 
         # Auto-adjust column widths
         for col_idx, col in enumerate(col_defs, start=1):
@@ -448,6 +466,18 @@ class TirunelveliExcelExporter:
         ws.cell(row=curr_row, column=1, value=note_text).font = Font(name="Calibri", size=10, italic=True)
         ws.row_dimensions[curr_row].height = 30
 
+        # Freeze header and enable auto-filter
+        ws.freeze_panes = "A3"
+        ws.auto_filter.ref = f"A2:M{curr_row - 3}"
+
+        # Professional print layout
+        ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
+        ws.page_setup.paperSize = ws.PAPERSIZE_A4
+        ws.page_setup.fitToWidth = 1
+        ws.page_setup.fitToHeight = 0
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+        ws.print_title_rows = "1:2"
+
         # Adjust columns
         for c_idx in range(1, len(headers_trip) + 1):
             col_letter = get_column_letter(c_idx)
@@ -546,6 +576,13 @@ class TirunelveliExcelExporter:
                         cell.alignment = Alignment(horizontal="left", vertical="center")
                         cell.number_format = "@"
                 curr_row += 1
+
+        # Professional print layout
+        ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
+        ws.page_setup.paperSize = ws.PAPERSIZE_A4
+        ws.page_setup.fitToWidth = 1
+        ws.page_setup.fitToHeight = 0
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
 
         # Adjust column widths
         ws.column_dimensions["A"].width = 36

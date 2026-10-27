@@ -13,6 +13,9 @@ from backend.app.schemas.reconciliation import (
     TirunelveliReconciliationResponse,
     TruckReconciliationDossier,
 )
+from backend.app.services.extraction.tirunelveli.party_normalizer import (
+    PartyNameNormalizer,
+)
 from backend.app.services.reconciliation.range_compressor import (
     InvoiceRangeCompressor,
 )
@@ -221,19 +224,40 @@ class TirunelveliReconciliationEngine:
             audit_notes.append("PARTY_FREIGHT: Freight recorded as 0 (paid by dealer/consignee; staff enter Bill To in TMS)")
 
         # -------------------------------------------------------------
-        # 4. Delivery Destination & Bill-To Discrepancy (PRD §5.4)
+        # 4. Delivery Destination, Ship-To & Bill-To Discrepancy (PRD §5.4)
         # -------------------------------------------------------------
-        del_place = lr_rec.delivery_place.value if (lr_rec and lr_rec.delivery_place) else ""
-        consignee = lr_rec.consignee.value if (lr_rec and lr_rec.consignee) else ""
-        bill_to = canonical_invoices[0].bill_to_party.value if canonical_invoices else consignee
+        raw_del = lr_rec.delivery_place.value if (lr_rec and lr_rec.delivery_place) else ""
+        raw_consignee = lr_rec.consignee.value if (lr_rec and lr_rec.consignee) else ""
+        raw_bill_to = canonical_invoices[0].bill_to_party.value if canonical_invoices else raw_consignee
+        raw_ship_to = (
+            canonical_invoices[0].ship_to_party.value
+            if (canonical_invoices and canonical_invoices[0].ship_to_party and canonical_invoices[0].ship_to_party.value)
+            else (raw_consignee or raw_del)
+        )
 
-        # Check if Bill-To differs from delivery destination (PRD §5.4)
-        bill_to_differs = False
+        del_place = PartyNameNormalizer.normalize(raw_del)
+        consignee = PartyNameNormalizer.normalize(raw_consignee or raw_ship_to)
+        ship_to = PartyNameNormalizer.normalize(raw_ship_to)
+        bill_to = PartyNameNormalizer.normalize(raw_bill_to)
+
+        # 4a. Bill-To vs Ship-To check (PRD §5.4: Supply Type Bill-To / Ship-To)
+        bill_to_differs_ship_to = False
+        if bill_to and ship_to:
+            clean_b = re.sub(r"[\s,\.\-]+", "", bill_to.lower())
+            clean_s = re.sub(r"[\s,\.\-]+", "", ship_to.lower())
+            if clean_b not in clean_s and clean_s not in clean_b:
+                bill_to_differs_ship_to = True
+                audit_notes.append(
+                    f"BILL_TO_DIFFERS_FROM_SHIP_TO: Bill-To '{bill_to}' differs from Ship-To '{ship_to}' (staff enter Bill To in TMS per PRD §5.4)"
+                )
+
+        # 4b. Bill-To vs Delivery Destination check
+        bill_to_differs_deliv = False
         if bill_to and del_place:
             clean_b = re.sub(r"[\s,\.\-]+", "", bill_to.lower())
             clean_d = re.sub(r"[\s,\.\-]+", "", del_place.lower())
             if clean_b not in clean_d and clean_d not in clean_b:
-                bill_to_differs = True
+                bill_to_differs_deliv = True
                 audit_notes.append(
                     f"BILL_TO_DIFFERS_FROM_DELIVERY: Bill-To '{bill_to}' differs from delivery place '{del_place}' (staff set Bill To in TMS per PRD §5.4)"
                 )
@@ -281,7 +305,7 @@ class TirunelveliReconciliationEngine:
         # -------------------------------------------------------------
         if len(consignment.candidate_invoices) > 0 or consignment.is_collision:
             status = ReconciliationStatus.CANDIDATE_UNRESOLVED
-        elif not weight_matches_lr or is_split_freight or bill_to_differs or has_duplicates:
+        elif not weight_matches_lr or is_split_freight or bill_to_differs_ship_to or bill_to_differs_deliv or has_duplicates:
             status = ReconciliationStatus.REVIEW_REQUIRED_DISCREPANCY
         else:
             status = ReconciliationStatus.CONFIRMED
@@ -295,8 +319,10 @@ class TirunelveliReconciliationEngine:
             booking_date=dossier.booking_date,
             delivery_place=del_place,
             consignee=consignee,
+            ship_to=ship_to,
             bill_to=bill_to,
-            bill_to_differs_from_delivery=bill_to_differs,
+            bill_to_differs_from_ship_to=bill_to_differs_ship_to,
+            bill_to_differs_from_delivery=bill_to_differs_deliv,
             compressed_invoices_cell=compressed_invoices,
             unique_invoices=unique_inv_numbers,
             physical_invoice_pages_count=phys_pages_count,

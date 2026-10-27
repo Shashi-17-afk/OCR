@@ -178,3 +178,61 @@ def test_ambiguous_page_flagged_as_unknown():
     assert page["classification"]["is_ambiguous"] is True
     assert len(page["review_flags"]) > 0
     assert any("manual classification" in flag.lower() for flag in data["global_review_flags"])
+
+
+def test_eway_bill_expiry_extraction_never_substitutes_doc_date():
+    """Regression test: EWB expiry strictly extracts Valid Until/Valid Upto with date and optional time,
+
+    and never substitutes earlier Document Date or Generated Date.
+    """
+    from backend.app.services.extraction.tirunelveli.eway_extractor import EwayBillExtractor
+
+    # Case 1: Scanned bundle format with date & time and earlier generated/document dates
+    raw_ocr_text = """
+    e-Way Bill System
+    Government of India
+    e-Way Bill No: 331084729101
+    Generated Date: 22/06/2025 09:35
+    Document Date: 22/06/2025
+    Valid From: 22/06/2025 09:35
+    Valid Until: 23/06/202523:59
+    Transporter Doc. No.: 19427
+    Vehicle No: TN52Y7426
+    """
+    ewb_data = EwayBillExtractor.extract(raw_ocr_text, page_number=5)
+    assert ewb_data.valid_upto is not None
+    assert ewb_data.valid_upto.value == "23/06/2025 23:59"
+    assert ewb_data.valid_upto.value != "22/06/2025"
+
+    # Case 2: Standard date-only format
+    text_date_only = """
+    e-Way Bill No: 331084729102
+    Doc Date: 22/06/2025
+    Valid Upto: 24/06/2025
+    """
+    ewb_data2 = EwayBillExtractor.extract(text_date_only, page_number=6)
+    assert ewb_data2.valid_upto is not None
+    assert ewb_data2.valid_upto.value == "24/06/2025"
+
+    # Case 3: Missing Valid Upto should return None, NEVER guess doc date
+    text_no_expiry = """
+    e-Way Bill No: 331084729103
+    Document Date: 22/06/2025
+    """
+    ewb_data3 = EwayBillExtractor.extract(text_no_expiry, page_number=7)
+    assert ewb_data3.valid_upto is None
+
+
+def test_party_name_normalizer_spacing():
+    """Regression test: PartyNameNormalizer restores spaces to collapsed words
+
+    without affecting numbers or already formatted text.
+    """
+    from backend.app.services.extraction.tirunelveli.party_normalizer import PartyNameNormalizer
+
+    assert PartyNameNormalizer.normalize("SRIMEENAKSHIPAPERMART") == "SRI MEENAKSHI PAPER MART"
+    assert PartyNameNormalizer.normalize("SRI MEENAKSHIPAPER MART") == "SRI MEENAKSHI PAPER MART"
+    assert PartyNameNormalizer.normalize("KAUSIKAENTERPRISES") == "KAUSIKA ENTERPRISES"
+    assert PartyNameNormalizer.normalize("MADURAI,TAMILNADU") == "MADURAI, TAMILNADU"
+    assert PartyNameNormalizer.normalize("Kausika Enterprises Private Limited, Ernakulam") == "Kausika Enterprises Private Limited, Ernakulam"
+

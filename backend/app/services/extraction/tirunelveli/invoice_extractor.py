@@ -4,6 +4,7 @@ from typing import Optional
 from backend.app.schemas.document import OCRLineResult
 from backend.app.schemas.extraction import ExtractedField, MaterialInvoiceData
 from backend.app.services.extraction.tirunelveli.lr_normalizer import LRNormalizer
+from backend.app.services.extraction.tirunelveli.party_normalizer import PartyNameNormalizer
 
 
 class MaterialInvoiceExtractor:
@@ -123,7 +124,7 @@ class MaterialInvoiceExtractor:
             re.IGNORECASE,
         )
         bill_to_text = (
-            bill_to_match.group(1).strip()
+            PartyNameNormalizer.normalize(bill_to_match.group(1).strip())
             if bill_to_match
             else "UNKNOWN_BILL_TO"
         )
@@ -142,7 +143,7 @@ class MaterialInvoiceExtractor:
             re.IGNORECASE,
         )
         ship_to_text = (
-            ship_to_match.group(1).strip()
+            PartyNameNormalizer.normalize(ship_to_match.group(1).strip())
             if ship_to_match
             else bill_to_text
         )

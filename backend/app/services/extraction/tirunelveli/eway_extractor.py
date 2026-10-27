@@ -41,23 +41,25 @@ class EwayBillExtractor:
             flag_reason="12-digit E-Way Bill number not detected" if not ewb_match else None,
         )
 
-        # 2. Valid Upto / Expiry Date (PRD §4: printout 'Valid Upto' only)
+        # 2. Valid Upto / Expiry Date (PRD §4: strictly printout 'Valid Upto' / 'Valid Until')
         expiry_match = re.search(
-            r"(?:valid\s*(?:upto|until|to)[:\s]*|\b)(\d{2}[-/\.]\d{2}[-/\.]\d{2,4}(?:\s+\d{2}:\d{2}(?::\d{2})?)?)",
+            r"valid\s*(?:upto|until|to)\s*[:\s-]*[\r\n\s]*(\d{2}[-/\.]\d{2}[-/\.]\d{2,4})\s*(\d{2}:\d{2}(?::\d{2})?)?",
             text,
             re.IGNORECASE,
         )
-        expiry_field = (
-            ExtractedField[str](
-                value=expiry_match.group(1),
+        if expiry_match:
+            date_part = expiry_match.group(1)
+            time_part = expiry_match.group(2)
+            expiry_val = f"{date_part} {time_part}" if time_part else date_part
+            expiry_field = ExtractedField[str](
+                value=expiry_val,
                 raw_text=expiry_match.group(0),
                 confidence=0.95,
-                bounding_box=find_box(r"valid\s*upto"),
+                bounding_box=find_box(r"valid\s*(?:upto|until|to)"),
                 source_page=page_number,
             )
-            if expiry_match
-            else None
-        )
+        else:
+            expiry_field = None
 
         # 3. Transporter Doc No (corresponds to LR number)
         doc_match = re.search(

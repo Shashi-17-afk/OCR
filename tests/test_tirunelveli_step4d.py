@@ -321,16 +321,33 @@ def test_synthetic_scanned_bundle_regression():
     wb = openpyxl.load_workbook(io.BytesIO(resp.content))
     ws_consignments = wb["Consignments"]
     assert ws_consignments["A3"].value == "TN52Y7426"
+    assert ws_consignments["B3"].value == "22/06/2025"
     assert ws_consignments["C3"].value == "019427"
+    assert ws_consignments["D3"].value == "SRI MEENAKSHI PAPER MART"
+    assert "MADURAI" in ws_consignments["E3"].value
+    assert ws_consignments["F3"].value == "KAUSIKA ENTERPRISES"
     assert ws_consignments["G3"].value == "2250601397-400"
     assert ws_consignments["H3"].value == 4
     assert ws_consignments["I3"].value == 4
     assert ws_consignments["J3"].value == 340
+    assert "120 bales" in ws_consignments["K3"].value
     assert ws_consignments["L3"].value == 17.451
+    assert ws_consignments["M3"].value == 0.0
+    assert "Party Freight" in ws_consignments["N3"].value
     assert ws_consignments["O3"].value == 1346779.00
     assert "331084729101" in ws_consignments["P3"].value
     assert "331084729104" in ws_consignments["P3"].value
+    assert ws_consignments["Q3"].value == "23/06/2025 23:59"
+    assert ws_consignments["R3"].value == "REVIEW_REQUIRED_DISCREPANCY"
+    assert "PARTY_FREIGHT" in ws_consignments["S3"].value
+    assert "BILL_TO_DIFFERS_FROM_SHIP_TO" in ws_consignments["S3"].value
     assert "LR: P9; Inv: P1-4; EWB: P5-8" in ws_consignments["T3"].value
+    assert ws_consignments["U3"].value == "SRI MEENAKSHI PAPER MART"
+
+    # Verify professional Excel properties
+    assert ws_consignments.freeze_panes == "A3"
+    assert ws_consignments.auto_filter.ref is not None
+    assert ws_consignments["O3"].number_format in ('"₹"#,##0.00', '₹#,##0.00', '#,##0.00')
 
     ws_acc = wb["Page Provenance & Accounting"]
     assert ws_acc["C3"].value == 9

@@ -116,6 +116,10 @@ class ConsignmentReconciliation(BaseModel):
     audit_notes: list[str] = Field(
         default_factory=list, description="Audit notes and discrepancy flags"
     )
+    lr_crop_base64: Optional[str] = Field(
+        default=None,
+        description="Base64 encoded snippet of handwritten LR number for manual check (FR4)",
+    )
 
 
 class TruckReconciliationDossier(BaseModel):

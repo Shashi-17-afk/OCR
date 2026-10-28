@@ -4,16 +4,23 @@ from backend.app.core.config import settings
 from backend.app.core.logging import logger
 from backend.app.schemas.classification import BookingType, LoadingPoint
 from backend.app.schemas.error import ErrorResponse
+from backend.app.schemas.erode_extraction import ErodeExtractionResponse
 from backend.app.schemas.extraction import TirunelveliExtractionResponse
 from backend.app.schemas.hierarchy import TirunelveliHierarchyResponse
-from backend.app.schemas.reconciliation import TirunelveliReconciliationResponse
+from backend.app.schemas.reconciliation import (
+    ReconciliationStatus,
+    TirunelveliReconciliationResponse,
+    TruckReconciliationDossier,
+)
 from backend.app.services.export.excel import TirunelveliExcelExporter
+from backend.app.services.extraction.erode.service import ErodeExtractionService
 from backend.app.services.extraction.tirunelveli.service import (
     TirunelveliExtractionService,
 )
 from backend.app.services.grouping.tirunelveli_linker import (
     TirunelveliDocumentLinker,
 )
+from backend.app.services.reconciliation.erode_reconciler import ErodeReconciler
 from backend.app.services.reconciliation.reconciler import (
     TirunelveliReconciliationEngine,
 )
@@ -460,5 +467,237 @@ async def export_tirunelveli_excel_from_reconciliation(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{download_filename}"'},
     )
+
+
+# ---------------------------------------------------------------------------
+# Erode Loading Point Endpoints (Client Phase 2)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/erode/extract",
+    response_model=ErodeExtractionResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Erode: Classify Pages & Extract Raw Fields",
+    description="Ingests Erode logistics documents (Despatch Details and handwritten LR sheet). Extracts table lines and metadata.",
+)
+async def extract_erode_document(
+    file: UploadFile = File(..., description="Erode document bundle (PDF, PNG, JPEG)"),
+    booking_type: BookingType = Query(
+        ...,
+        description="Mandatory booking type decided by staff ('direct' or 'group')",
+    ),
+    enable_ocr: bool = Query(
+        default=True,
+        description="Whether to run local OCR for scanned pages",
+    ),
+) -> ErodeExtractionResponse:
+    """Extracts raw fields from Erode Despatch Details and LR sheets."""
+    max_read_bytes = settings.MAX_FILE_SIZE_BYTES + 1024
+    content = await file.read(max_read_bytes)
+
+    if len(content) > settings.MAX_FILE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=f"Uploaded file exceeds maximum limit of {settings.MAX_FILE_SIZE_BYTES} bytes.",
+        )
+
+    filename = file.filename or "erode_document"
+    try:
+        return ErodeExtractionService.process(
+            content=content,
+            original_filename=filename,
+            booking_type=booking_type,
+            enable_ocr=enable_ocr,
+        )
+    except EmptyFileError as err:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err.message) from err
+    except UnsupportedFormatError as err:
+        raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=err.message) from err
+    except (EncryptedDocumentError, ExcessivePagesError, MalformedDocumentError) as err:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=err.message) from err
+
+
+@router.post(
+    "/erode/reconcile",
+    response_model=TirunelveliReconciliationResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Erode: Reconcile Booking Documents",
+    description="Reconciles Erode Despatch Details and LR sheet, applying PRD §5 & §6 rules.",
+)
+async def reconcile_erode_document(
+    file: UploadFile = File(..., description="Erode document bundle (PDF, PNG, JPEG)"),
+    booking_type: BookingType = Query(
+        ...,
+        description="Mandatory booking type decided by staff ('direct' or 'group')",
+    ),
+    enable_ocr: bool = Query(
+        default=True,
+        description="Whether to run local OCR for scanned pages",
+    ),
+) -> TirunelveliReconciliationResponse:
+    """Reconciles Erode documents and produces truck dossier."""
+    max_read_bytes = settings.MAX_FILE_SIZE_BYTES + 1024
+    content = await file.read(max_read_bytes)
+
+    if len(content) > settings.MAX_FILE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=f"Uploaded file exceeds maximum limit of {settings.MAX_FILE_SIZE_BYTES} bytes.",
+        )
+
+    filename = file.filename or "erode_document"
+    try:
+        extract_res = ErodeExtractionService.process(
+            content=content,
+            original_filename=filename,
+            booking_type=booking_type,
+            enable_ocr=enable_ocr,
+        )
+        dossier = ErodeReconciler.reconcile(
+            lr_sheet=extract_res.lr_sheet,
+            despatch_sheet=extract_res.despatch_sheet,
+            booking_type=booking_type,
+        )
+
+        all_notes = [note for c in dossier.reconciled_consignments for note in c.audit_notes]
+        overall_status = ReconciliationStatus.CONFIRMED
+        if any(c.status != ReconciliationStatus.CONFIRMED for c in dossier.reconciled_consignments):
+            overall_status = ReconciliationStatus.REVIEW_REQUIRED_DISCREPANCY
+
+        total_pages = len(extract_res.pages)
+        return TirunelveliReconciliationResponse(
+            document_id=extract_res.document_id,
+            original_filename=filename,
+            loading_point=LoadingPoint.ERODE,
+            booking_type=booking_type,
+            truck_dossiers=[dossier],
+            total_pages_in=total_pages,
+            total_pages_accounted_for=total_pages,
+            global_reconciliation_flags=all_notes,
+            unassigned_pages=[],
+        )
+    except EmptyFileError as err:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err.message) from err
+    except UnsupportedFormatError as err:
+        raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=err.message) from err
+    except (EncryptedDocumentError, ExcessivePagesError, MalformedDocumentError) as err:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=err.message) from err
+
+
+@router.post(
+    "/erode/export-excel",
+    status_code=status.HTTP_200_OK,
+    summary="Erode: Reconcile Booking & Export Excel Workbook",
+    description="Full Erode pipeline: processes Despatch and LR sheets, reconciles, and exports formatted .xlsx workbook.",
+)
+async def export_erode_excel(
+    file: UploadFile = File(..., description="Erode document bundle (PDF, PNG, JPEG)"),
+    booking_type: BookingType = Query(
+        ...,
+        description="Mandatory booking type decided by staff ('direct' or 'group')",
+    ),
+    enable_ocr: bool = Query(
+        default=True,
+        description="Whether to run local OCR for scanned pages",
+    ),
+) -> Response:
+    """Exports formatted Excel (.xlsx) for an Erode document bundle."""
+    reconciled_resp = await reconcile_erode_document(
+        file=file,
+        booking_type=booking_type,
+        enable_ocr=enable_ocr,
+    )
+    excel_bytes = TirunelveliExcelExporter.export(reconciled_resp)
+
+    if reconciled_resp.truck_dossiers:
+        d = reconciled_resp.truck_dossiers[0]
+        date_clean = d.booking_date.replace("/", ".").replace("-", ".")
+        download_filename = f"{d.truck_number}_{date_clean}_reconciled.xlsx"
+    else:
+        download_filename = f"{reconciled_resp.original_filename}_reconciled.xlsx"
+
+    return Response(
+        content=excel_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{download_filename}"'},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Unified Multi-Loading Point Endpoints (Auto-Routing)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/reconcile",
+    response_model=TirunelveliReconciliationResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Unified: Reconcile Booking Documents (Tirunelveli or Erode)",
+    description="Auto-routes to Tirunelveli or Erode reconciliation pipeline based on loading_point parameter.",
+)
+async def reconcile_booking(
+    file: UploadFile = File(..., description="Document bundle (PDF, PNG, JPEG)"),
+    loading_point: LoadingPoint = Query(
+        ...,
+        description="Loading point selection ('tirunelveli' or 'erode')",
+    ),
+    booking_type: BookingType = Query(
+        ...,
+        description="Staff-selected booking type ('direct' or 'group')",
+    ),
+    enable_ocr: bool = Query(
+        default=True,
+        description="Whether to run local OCR for scanned pages",
+    ),
+) -> TirunelveliReconciliationResponse:
+    """Unified reconciliation endpoint supporting both Tirunelveli and Erode."""
+    if loading_point == LoadingPoint.ERODE:
+        return await reconcile_erode_document(file=file, booking_type=booking_type, enable_ocr=enable_ocr)
+    else:
+        return await reconcile_tirunelveli_document(file=file, loading_point=loading_point, booking_type=booking_type, enable_ocr=enable_ocr)
+
+
+@router.post(
+    "/export-excel",
+    status_code=status.HTTP_200_OK,
+    summary="Unified: Reconcile Booking & Export Excel (Tirunelveli or Erode)",
+    description="Auto-routes to Tirunelveli or Erode pipeline and exports TMS-compliant Excel workbook.",
+)
+async def export_booking_excel(
+    file: UploadFile = File(..., description="Document bundle (PDF, PNG, JPEG)"),
+    loading_point: LoadingPoint = Query(
+        ...,
+        description="Loading point selection ('tirunelveli' or 'erode')",
+    ),
+    booking_type: BookingType = Query(
+        ...,
+        description="Staff-selected booking type ('direct' or 'group')",
+    ),
+    enable_ocr: bool = Query(
+        default=True,
+        description="Whether to run local OCR for scanned pages",
+    ),
+) -> Response:
+    """Unified Excel export endpoint supporting both Tirunelveli and Erode."""
+    if loading_point == LoadingPoint.ERODE:
+        return await export_erode_excel(file=file, booking_type=booking_type, enable_ocr=enable_ocr)
+    else:
+        return await export_tirunelveli_excel(file=file, loading_point=loading_point, booking_type=booking_type, enable_ocr=enable_ocr)
+
+
+@router.post(
+    "/export-excel-from-reconciliation",
+    status_code=status.HTTP_200_OK,
+    summary="Unified: Export Excel from Reconciliation Response JSON",
+    description="Generates an Excel workbook directly from an existing reconciliation JSON response for Tirunelveli or Erode.",
+)
+async def export_booking_excel_from_reconciliation(
+    reconciliation: TirunelveliReconciliationResponse = Body(..., description="Reconciliation response payload"),
+) -> Response:
+    """Unified Excel export from reconciliation response JSON."""
+    return await export_tirunelveli_excel_from_reconciliation(reconciliation=reconciliation)
+
+
 
 

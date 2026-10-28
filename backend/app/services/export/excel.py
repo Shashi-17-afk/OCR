@@ -285,8 +285,9 @@ class TirunelveliExcelExporter:
         num_cols = len(col_defs)
         ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=num_cols)
         banner_cell = ws.cell(row=1, column=1)
+        lp = data.loading_point.value.upper() if hasattr(data, "loading_point") and data.loading_point else "LOGISTICS"
         banner_cell.value = (
-            f"CTLS TMS EXPORT - TIRUNELVELI  |  [PROVISIONAL LAYOUT - Subject to Official Template Confirmation]  |  "
+            f"CTLS TMS EXPORT - {lp}  |  [PROVISIONAL LAYOUT - Subject to Official Template Confirmation]  |  "
             f"Document: {data.original_filename}  |  Booking: {data.booking_type.value.upper()}"
         )
         banner_cell.font = banner_font

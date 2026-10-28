@@ -277,6 +277,8 @@
         return 'class-lr';
       case 'SECURITY_COPY':
         return 'class-sec';
+      case 'DESPATCH_SHEET':
+        return 'class-despatch';
       default:
         return 'class-unknown';
     }
@@ -301,7 +303,7 @@
     const formData = new FormData();
     formData.append('file', state.selectedFile);
 
-    const url = `/api/v1/bookings/tirunelveli/reconcile?loading_point=${encodeURIComponent(
+    const url = `/api/v1/bookings/reconcile?loading_point=${encodeURIComponent(
       state.loadingPoint
     )}&booking_type=${encodeURIComponent(state.bookingType)}&enable_ocr=${state.enableOcr}`;
 
@@ -331,7 +333,7 @@
           } else if (response.status === 502) {
             errorMsg = 'Server returned 502 Bad Gateway with empty response: The OCR backend process was terminated (commonly out of memory on 512 MB free tier instances).';
           }
-        } catch (_) {}
+        } catch (_) { }
         throw new Error(errorMsg);
       }
 
@@ -426,6 +428,8 @@
         return 'LR';
       case 'SECURITY_COPY':
         return 'SEC';
+      case 'DESPATCH_SHEET':
+        return 'DESP';
       default:
         return 'PAGE';
     }
@@ -460,6 +464,9 @@
       elements.metricGateSheetTie.style.color = dossier.packages_tie_security_copy
         ? 'var(--success)'
         : 'var(--warning)';
+    } else if (state.loadingPoint === 'erode') {
+      elements.metricGateSheetTie.textContent = 'Despatch Sheet: Verified';
+      elements.metricGateSheetTie.style.color = 'var(--success)';
     } else {
       elements.metricGateSheetTie.textContent = 'Gate Sheet: N/A (Direct)';
       elements.metricGateSheetTie.style.color = 'var(--text-muted)';
@@ -492,9 +499,8 @@
             </svg>
             Consignment ${index + 1}: LR ${c.lr_number_raw} (Page ${c.source_page})
           </h3>
-          <span class="badge-status ${
-            c.status === 'CONFIRMED' ? 'badge-status-confirmed' : 'badge-status-review'
-          }">${c.status}</span>
+          <span class="badge-status ${c.status === 'CONFIRMED' ? 'badge-status-confirmed' : 'badge-status-review'
+        }">${c.status}</span>
         </div>
 
         <div class="fields-grid">
@@ -504,9 +510,18 @@
               <span class="field-label">LR Number (Raw & Normalized)</span>
               <span class="confidence-chip conf-high">Confirmed</span>
             </div>
-            <input type="text" class="editable-input" data-field="lr_number_raw" data-idx="${index}" value="${
-        c.lr_number_raw
-      }">
+            ${c.lr_crop_base64
+          ? `<div class="lr-crop-container" title="Handwritten LR snippet (FR4)">
+                     <div class="lr-crop-header">
+                       <span class="lr-crop-label">Handwritten LR Snippet (FR4)</span>
+                       <span class="confidence-chip conf-high" style="font-size: 0.65rem;">LR Crop</span>
+                     </div>
+                     <img src="data:image/png;base64,${c.lr_crop_base64}" alt="Handwritten LR ${c.lr_number_raw}" class="lr-crop-image" />
+                   </div>`
+          : ''
+        }
+            <input type="text" class="editable-input" data-field="lr_number_raw" data-idx="${index}" value="${c.lr_number_raw
+        }">
           </div>
 
           <!-- Truck Number -->
@@ -515,9 +530,8 @@
               <span class="field-label">Truck Registration</span>
               <span class="confidence-chip conf-high">Vehicle</span>
             </div>
-            <input type="text" class="editable-input" data-field="truck_number" data-idx="${index}" value="${
-        c.truck_number
-      }">
+            <input type="text" class="editable-input" data-field="truck_number" data-idx="${index}" value="${c.truck_number
+        }">
           </div>
 
           <!-- Booking Date -->
@@ -525,9 +539,8 @@
             <div class="field-header">
               <span class="field-label">Booking Date</span>
             </div>
-            <input type="text" class="editable-input" data-field="booking_date" data-idx="${index}" value="${
-        c.booking_date
-      }">
+            <input type="text" class="editable-input" data-field="booking_date" data-idx="${index}" value="${c.booking_date
+        }">
           </div>
 
           <!-- Invoices Range -->
@@ -536,9 +549,8 @@
               <span class="field-label">Invoices Range (PRD §5.3)</span>
               <span class="confidence-chip conf-high">${c.unique_invoices.length} unique</span>
             </div>
-            <input type="text" class="editable-input" data-field="compressed_invoices_cell" data-idx="${index}" value="${
-        c.compressed_invoices_cell
-      }">
+            <input type="text" class="editable-input" data-field="compressed_invoices_cell" data-idx="${index}" value="${c.compressed_invoices_cell
+        }">
           </div>
 
           <!-- Delivery Place -->
@@ -546,9 +558,8 @@
             <div class="field-header">
               <span class="field-label">Delivery Destination</span>
             </div>
-            <input type="text" class="editable-input" data-field="delivery_place" data-idx="${index}" value="${
-        c.delivery_place
-      }">
+            <input type="text" class="editable-input" data-field="delivery_place" data-idx="${index}" value="${c.delivery_place
+        }">
           </div>
 
           <!-- Consignee -->
@@ -556,24 +567,21 @@
             <div class="field-header">
               <span class="field-label">Consignee</span>
             </div>
-            <input type="text" class="editable-input" data-field="consignee" data-idx="${index}" value="${
-        c.consignee
-      }">
+            <input type="text" class="editable-input" data-field="consignee" data-idx="${index}" value="${c.consignee
+        }">
           </div>
 
           <!-- Bill-To -->
           <div class="field-item">
             <div class="field-header">
               <span class="field-label">Bill To Customer</span>
-              ${
-                c.bill_to_differs_from_delivery
-                  ? '<span class="confidence-chip conf-mid" title="Differs from delivery destination">Differs from Delivery</span>'
-                  : ''
-              }
+              ${c.bill_to_differs_from_delivery
+          ? '<span class="confidence-chip conf-mid" title="Differs from delivery destination">Differs from Delivery</span>'
+          : ''
+        }
             </div>
-            <input type="text" class="editable-input ${
-              c.bill_to_differs_from_delivery ? 'diff-alert' : ''
-            }" data-field="bill_to" data-idx="${index}" value="${c.bill_to}">
+            <input type="text" class="editable-input ${c.bill_to_differs_from_delivery ? 'diff-alert' : ''
+        }" data-field="bill_to" data-idx="${index}" value="${c.bill_to}">
           </div>
 
           <!-- Total Packages -->
@@ -581,9 +589,8 @@
             <div class="field-header">
               <span class="field-label">Total Packages</span>
             </div>
-            <input type="number" class="editable-input" data-field="total_packages" data-idx="${index}" value="${
-        c.total_packages
-      }">
+            <input type="number" class="editable-input" data-field="total_packages" data-idx="${index}" value="${c.total_packages
+        }">
           </div>
 
           <!-- Governing Weight (MT) -->
@@ -593,8 +600,8 @@
               <span class="confidence-chip conf-high">Invoice Governs</span>
             </div>
             <input type="number" step="0.001" class="editable-input" data-field="governing_weight_mt" data-idx="${index}" value="${c.governing_weight_mt.toFixed(
-        3
-      )}">
+          3
+        )}">
           </div>
 
           <!-- Consignment Value -->
@@ -603,21 +610,20 @@
               <span class="field-label">Total Consignment Value (₹)</span>
             </div>
             <input type="number" step="0.01" class="editable-input" data-field="total_value_rs" data-idx="${index}" value="${c.total_value_rs.toFixed(
-        2
-      )}">
+          2
+        )}">
           </div>
 
           <!-- Freight Amount -->
           <div class="field-item">
             <div class="field-header">
               <span class="field-label">Freight Charge (₹)</span>
-              <span class="confidence-chip ${c.is_party_freight ? 'conf-high' : 'conf-mid'}">${
-        c.is_party_freight ? 'Party Freight (0.00)' : 'Shipper Freight'
-      }</span>
+              <span class="confidence-chip ${c.is_party_freight ? 'conf-high' : 'conf-mid'}">${c.is_party_freight ? 'Party Freight (0.00)' : 'Shipper Freight'
+        }</span>
             </div>
             <input type="number" step="0.01" class="editable-input" data-field="freight_amount" data-idx="${index}" value="${c.freight_amount.toFixed(
-        2
-      )}">
+          2
+        )}">
           </div>
 
           <!-- E-Way Bills -->
@@ -625,21 +631,19 @@
             <div class="field-header">
               <span class="field-label">E-Way Bill Numbers</span>
             </div>
-            <input type="text" class="editable-input" data-field="eway_bills_cell" data-idx="${index}" value="${
-        c.eway_bills_cell
-      }">
+            <input type="text" class="editable-input" data-field="eway_bills_cell" data-idx="${index}" value="${c.eway_bills_cell
+        }">
           </div>
         </div>
 
-        ${
-          c.audit_notes && c.audit_notes.length > 0
-            ? `<div style="margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
+        ${c.audit_notes && c.audit_notes.length > 0
+          ? `<div style="margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border-color);">
                 <span class="field-label" style="display:block; margin-bottom: 0.4rem;">Consignment Audit Flags:</span>
                 ${c.audit_notes
-                  .map((note) => `<div class="raw-snippet" style="color: #fbbf24;">⚠️ ${note}</div>`)
-                  .join('')}
+            .map((note) => `<div class="raw-snippet" style="color: #fbbf24;">⚠️ ${note}</div>`)
+            .join('')}
                </div>`
-            : ''
+          : ''
         }
       `;
 
@@ -740,9 +744,8 @@
               <span class="field-label">${formatFieldLabel(key)}</span>
               <span class="confidence-chip conf-high">${fieldConf}</span>
             </div>
-            <div class="editable-input" style="background: rgba(255,255,255,0.03);">${
-              fieldObj.value !== null ? fieldObj.value : '—'
-            }</div>
+            <div class="editable-input" style="background: rgba(255,255,255,0.03);">${fieldObj.value !== null ? fieldObj.value : '—'
+          }</div>
             ${rawSnippet ? `<div class="raw-snippet">OCR: "${rawSnippet}"</div>` : ''}
           </div>
         `;
@@ -760,15 +763,14 @@
         </div>
       </div>
 
-      ${
-        flags.length > 0
-          ? `<div class="banner-list">${flags
-              .map(
-                (f) =>
-                  `<div class="notice-banner banner-warning"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none"><path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>${f}</div>`
-              )
-              .join('')}</div>`
-          : ''
+      ${flags.length > 0
+        ? `<div class="banner-list">${flags
+          .map(
+            (f) =>
+              `<div class="notice-banner banner-warning"><svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none"><path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>${f}</div>`
+          )
+          .join('')}</div>`
+        : ''
       }
 
       <div class="card-title">Extracted Document Fields</div>
@@ -882,7 +884,7 @@
     }
 
     try {
-      const response = await fetch('/api/v1/bookings/tirunelveli/export-excel-from-reconciliation', {
+      const response = await fetch('/api/v1/bookings/export-excel-from-reconciliation', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -902,7 +904,7 @@
               if (raw.length < 200) errDesc = raw.trim();
             }
           }
-        } catch (_) {}
+        } catch (_) { }
         throw new Error(errDesc);
       }
 

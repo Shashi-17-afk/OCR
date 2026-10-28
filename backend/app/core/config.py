@@ -1,3 +1,4 @@
+import os
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -9,8 +10,8 @@ class Settings(BaseSettings):
     APP_ENV: str = "development"
     DEBUG: bool = False
     API_V1_PREFIX: str = "/api/v1"
-    HOST: str = "127.0.0.1"
-    PORT: int = 8000
+    HOST: str = "0.0.0.0" if os.environ.get("SERVER_PORT") else "127.0.0.1"
+    PORT: int = int(os.environ.get("SERVER_PORT", os.environ.get("PORT", "8000")))
     LOG_LEVEL: str = "INFO"
 
     # Ingestion & Validation Limits

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Body, File, HTTPException, Query, Response, UploadFile, status
 
 from backend.app.core.config import settings
+from backend.app.core.logging import logger
 from backend.app.schemas.classification import BookingType, LoadingPoint
 from backend.app.schemas.error import ErrorResponse
 from backend.app.schemas.extraction import TirunelveliExtractionResponse
@@ -114,6 +115,13 @@ async def extract_tirunelveli_document(
             detail=err.message,
         ) from err
 
+    except MemoryError as err:
+        logger.error("Memory limit exceeded during extraction: %s", str(err))
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Server memory limit exceeded during document processing. Please reduce the number of pages or disable OCR if the document contains embedded text.",
+        ) from err
+
 
 @router.post(
     "/tirunelveli/link",
@@ -198,6 +206,13 @@ async def link_tirunelveli_document(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=err.message,
+        ) from err
+
+    except MemoryError as err:
+        logger.error("Memory limit exceeded during linking: %s", str(err))
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Server memory limit exceeded during document processing. Please reduce the number of pages or disable OCR if the document contains embedded text.",
         ) from err
 
 
@@ -286,6 +301,13 @@ async def reconcile_tirunelveli_document(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=err.message,
+        ) from err
+
+    except MemoryError as err:
+        logger.error("Memory limit exceeded during reconciliation: %s", str(err))
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Server memory limit exceeded during document processing. Please reduce the number of pages or disable OCR if the document contains embedded text.",
         ) from err
 
 
@@ -393,6 +415,13 @@ async def export_tirunelveli_excel(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=err.message,
+        ) from err
+
+    except MemoryError as err:
+        logger.error("Memory limit exceeded during Excel export: %s", str(err))
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Server memory limit exceeded during document processing. Please reduce the number of pages or disable OCR if the document contains embedded text.",
         ) from err
 
 

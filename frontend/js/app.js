@@ -312,11 +312,39 @@
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.message || `Server returned error ${response.status}`);
+        let errorMsg = `Server returned error ${response.status} (${response.statusText || 'Error'})`;
+        try {
+          const rawText = await response.text();
+          if (rawText && rawText.trim()) {
+            try {
+              const errorData = JSON.parse(rawText);
+              errorMsg = errorData.message || errorData.detail || errorMsg;
+            } catch (_) {
+              if (response.status === 502) {
+                errorMsg = 'Server returned 502 Bad Gateway: The server process crashed or was terminated by the host (commonly due to memory limits during high-DPI OCR on free hosting instances).';
+              } else if (response.status === 504) {
+                errorMsg = 'Server returned 504 Gateway Timeout: Processing took longer than the server timeout limit.';
+              } else if (rawText.length < 200) {
+                errorMsg = rawText.trim();
+              }
+            }
+          } else if (response.status === 502) {
+            errorMsg = 'Server returned 502 Bad Gateway with empty response: The OCR backend process was terminated (commonly out of memory on 512 MB free tier instances).';
+          }
+        } catch (_) {}
+        throw new Error(errorMsg);
       }
 
-      const data = await response.json();
+      let data;
+      try {
+        const text = await response.text();
+        if (!text || !text.trim()) {
+          throw new Error('Server returned an empty response body');
+        }
+        data = JSON.parse(text);
+      } catch (parseErr) {
+        throw new Error(`Failed to parse server response as JSON: ${parseErr.message}`);
+      }
       state.reconciliationData = data;
       state.totalPages = data.total_pages_in || 1;
 
@@ -863,7 +891,19 @@
       });
 
       if (!response.ok) {
-        throw new Error(`Export failed with HTTP ${response.status}`);
+        let errDesc = `Export failed with HTTP ${response.status} (${response.statusText || 'Error'})`;
+        try {
+          const raw = await response.text();
+          if (raw && raw.trim()) {
+            try {
+              const errObj = JSON.parse(raw);
+              errDesc = errObj.message || errObj.detail || errDesc;
+            } catch (_) {
+              if (raw.length < 200) errDesc = raw.trim();
+            }
+          }
+        } catch (_) {}
+        throw new Error(errDesc);
       }
 
       const blob = await response.blob();

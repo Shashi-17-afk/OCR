@@ -170,7 +170,9 @@ class PDFParser:
             try:
                 pix = page.get_pixmap(dpi=settings.OCR_DPI)
                 img_bytes = pix.tobytes("png")
+                pix = None
                 ocr_result = ocr_engine.extract(img_bytes)
+                img_bytes = None
 
                 if ocr_result.text.strip():
                     return (

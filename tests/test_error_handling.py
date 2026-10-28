@@ -31,3 +31,21 @@ def test_internal_server_error_safety() -> None:
     # Verify sensitive error string was NOT leaked to the client
     assert "secret_pass" not in response.text
     assert "RuntimeError" not in response.text
+
+
+def test_memory_error_structured_503() -> None:
+    """Verify MemoryError returns structured JSON 503 instead of unstructured crash."""
+    from unittest.mock import patch
+    from backend.app.main import app
+
+    client = TestClient(app, raise_server_exceptions=False)
+    with patch("backend.app.services.extraction.tirunelveli.service.TirunelveliExtractionService.process", side_effect=MemoryError("Out of memory")):
+        response = client.post(
+            "/api/v1/bookings/tirunelveli/reconcile?loading_point=tirunelveli&booking_type=direct&enable_ocr=false",
+            files={"file": ("dummy.pdf", b"%PDF-1.4 dummy", "application/pdf")},
+        )
+        assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+        data = response.json()
+        assert data["error_code"] == "HTTP_503"
+        assert "memory limit exceeded" in data["message"].lower()
+

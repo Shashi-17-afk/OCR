@@ -100,3 +100,18 @@ def test_ui_dom_element_bindings():
     assert "footerStatusText: document.getElementById('footerStatusText')" in js_text
     assert 'id="footerStatusText"' in html_text
 
+
+def test_ui_safe_non_json_error_handling():
+    """Verifies that frontend/js/app.js handles empty and non-JSON error responses (like 502/504)
+    without crashing on await response.json().
+    """
+    resp_js = client.get("/static/js/app.js")
+    assert resp_js.status_code == status.HTTP_200_OK
+    js_text = resp_js.text
+
+    # Verify that rawText is read and parsed defensively rather than blind response.json()
+    assert "await response.text()" in js_text
+    assert "JSON.parse" in js_text
+    assert "502 Bad Gateway" in js_text
+
+

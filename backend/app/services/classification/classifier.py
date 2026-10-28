@@ -84,6 +84,23 @@ class TirunelveliPageClassifier:
 
         cleaned_text = text.lower()
 
+        # Check for summary, checklist, or test bundle verification pages
+        # (These contain reference instructions, prose, or checklists; not actual transport documents)
+        if re.search(
+            r"manual\s*verification\s*checklist|verification\s*checklist|\bchecklist\b|"
+            r"test\s*bundle|expected\s*results\s*\(ground\s*truth\)|ground\s*truth|"
+            r"use\s*this\s*page\s*while\s*checking",
+            cleaned_text,
+        ):
+            return PageClassificationResult(
+                page_number=page_number,
+                classification=PageClassificationType.UNKNOWN_PAGE,
+                confidence=0.10,
+                detected_anchors=["summary_or_checklist_page"],
+                is_ambiguous=True,
+                review_reason="Summary or checklist page containing guidance/test prose; not a transport booking document",
+            )
+
         scores: dict[PageClassificationType, float] = {
             PageClassificationType.MATERIAL_INVOICE: 0.0,
             PageClassificationType.EWAY_BILL: 0.0,

@@ -271,23 +271,39 @@ class MaterialInvoiceExtractor:
 
         # 11. Net Claim Rs / Invoice Total
         claim_val = 0.0
-        m_nc = re.search(r"net\s*claim\s*rs\.?[:\s]*[\r\n\s]*([\d,]+\.?\d*)", text, re.IGNORECASE)
+        # Check standard invoice total / net claim headers (accounting for currency/glyph prefixes like I, ₹, Rs., |)
+        m_nc = re.search(
+            r"(?:invoice\s*total|net\s*claim(?:\s*rs\.?)?|total\s*(?:invoice)?\s*(?:value|amount)|grand\s*total)[:\s]*[\r\n\s]*[iI|₹Rs\.]*\s*([\d,]+\.\d{2}|[\d,]+)",
+            text,
+            re.IGNORECASE,
+        )
         if m_nc:
             try:
                 candidate = float(m_nc.group(1).replace(",", ""))
-                if candidate > 100.0:
+                if candidate > 10.0:
                     claim_val = candidate
             except ValueError:
                 pass
 
         if claim_val == 0.0:
-            candidates = [float(x.replace(",", "")) for x in re.findall(r"\b(\d{5,7}\.\d{2})\b", text)]
-            val_candidates = [x for x in candidates if x > 10000.0 and abs(x - gross_wt) > 1.0 and abs(x - net_wt) > 1.0]
+            candidates = [
+                float(x.replace(",", ""))
+                for x in re.findall(r"(?:^|[\s₹iI|Rs\.])(\d{4,7}\.\d{2})\b", text)
+            ]
+            val_candidates = [
+                x for x in candidates
+                if x > 1000.0 and abs(x - gross_wt) > 1.0 and abs(x - net_wt) > 1.0
+            ]
             if val_candidates:
                 claim_val = val_candidates[-1]
             else:
                 c2 = [float(x.replace(",", "")) for x in re.findall(r"\b(\d{5,7})\b", text)]
-                val_c2 = [x for x in c2 if x > 10000.0 and x not in (627001, 625001, 641001, 620001)]
+                val_c2 = [
+                    x for x in c2
+                    if x > 10000.0
+                    and x not in (627001, 625001, 641001, 620001)
+                    and (not lr_field or int(x) != int(lr_field.normalized_value))
+                ]
                 if val_c2:
                     claim_val = val_c2[-1]
 

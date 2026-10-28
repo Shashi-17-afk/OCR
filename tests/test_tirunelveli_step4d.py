@@ -354,3 +354,76 @@ def test_synthetic_scanned_bundle_regression():
     assert ws_acc["D3"].value == 9
     assert "Zero unassigned pages" in ws_acc["A7"].value
 
+
+def test_group_booking_synthetic_bundle_regression():
+    """Regression test for the 8-page Group Booking bundle (group_booking_synthetic_test_bundle.pdf):
+
+    - Exactly 2 distinct LRs: 019427 and 019428.
+    - Invoice 2250601397 and E-way bill 331084729101 link to LR 019427.
+    - Invoice 2250601398 and E-way bill 331084729102 link to LR 019428.
+    - LR 019427: 120 packages, 6.000 MT, Rs 100,000.
+    - LR 019428: 80 packages, 4.000 MT, Rs 150,000.
+    - Combined: 200 packages, 10.000 MT, Rs 250,000.
+    - Strict conservation: 8/8 pages accounted for (Pages 1 and 8 as UNKNOWN_PAGE in unassigned pool).
+    """
+    with open("TEST-m/group_booking_synthetic_test_bundle.pdf", "rb") as f:
+        pdf_bytes = f.read()
+
+    resp = client.post(
+        "/api/v1/bookings/tirunelveli/export-excel?loading_point=tirunelveli&booking_type=group&enable_ocr=false",
+        files={"file": ("group_booking_synthetic_test_bundle.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert resp.status_code == status.HTTP_200_OK
+
+    wb = openpyxl.load_workbook(io.BytesIO(resp.content))
+
+    # 1. Consignments sheet
+    ws_consignments = wb["Consignments"]
+    # Row 3: LR 019427
+    assert ws_consignments["A3"].value == "TN52Y7426"
+    assert ws_consignments["B3"].value == "22/06/2025"
+    assert ws_consignments["C3"].value == "019427"
+    assert ws_consignments["D3"].value == "Sri Meenakshi Paper Mart"
+    assert ws_consignments["F3"].value == "Kausika Enterprises"
+    assert ws_consignments["G3"].value == "2250601397"
+    assert ws_consignments["H3"].value == 1
+    assert ws_consignments["J3"].value == 120
+    assert ws_consignments["L3"].value == 6.0
+    assert ws_consignments["M3"].value == 0.0
+    assert ws_consignments["O3"].value == 100000.0
+    assert ws_consignments["P3"].value == "331084729101"
+    assert ws_consignments["Q3"].value == "23/06/2025 23:59"
+    assert ws_consignments["T3"].value == "LR: P2; Inv: P3; EWB: P4"
+
+    # Row 4: LR 019428
+    assert ws_consignments["A4"].value == "TN52Y7426"
+    assert ws_consignments["B4"].value == "22/06/2025"
+    assert ws_consignments["C4"].value == "019428"
+    assert ws_consignments["D4"].value == "South Star Traders"
+    assert ws_consignments["F4"].value == "Kausika Enterprises"
+    assert ws_consignments["G4"].value == "2250601398"
+    assert ws_consignments["H4"].value == 1
+    assert ws_consignments["J4"].value == 80
+    assert ws_consignments["L4"].value == 4.0
+    assert ws_consignments["M4"].value == 0.0
+    assert ws_consignments["O4"].value == 150000.0
+    assert ws_consignments["P4"].value == "331084729102"
+    assert ws_consignments["Q4"].value == "23/06/2025 23:59"
+    assert ws_consignments["T4"].value == "LR: P5; Inv: P6; EWB: P7"
+
+    # 2. Trip Summary sheet
+    ws_trip = wb["Trip Summary & Gate Check"]
+    assert ws_trip["A3"].value == "TN52Y7426"
+    assert ws_trip["E3"].value == 2
+    assert ws_trip["F3"].value == 10.0
+    assert ws_trip["G3"].value == 200
+    assert ws_trip["H3"].value == 0.0
+    assert ws_trip["I3"].value == 250000.0
+
+    # 3. Page Accounting sheet
+    ws_acc = wb["Page Provenance & Accounting"]
+    assert ws_acc["C3"].value == 8
+    assert ws_acc["D3"].value == 8
+    assert "CONSERVED" in ws_acc["E3"].value
+
+

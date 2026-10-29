@@ -145,3 +145,96 @@ def create_synthetic_erode_bundle_pdf(is_direct: bool = False) -> bytes:
     doc.close()
     return bundle_bytes
 
+
+def create_synthetic_erode_transport_invoice_pdf(
+    inv_number: str = "ERD/INV/2026/00481",
+    lr_number: str = "ERD-LR-2026-019427",
+    truck_no: str = "TN 33 AB 1234",
+    total_val: str = "INR 56,640.00",
+) -> bytes:
+    """Generates synthetic Erode Material Invoice PDF."""
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    text = f"""MATERIAL INVOICE
+Kaveri Industrial Components (Synthetic)
+SYNTHETIC TEST DOCUMENT - NOT A REAL TAX OR TRANSPORT DOCUMENT
+Document Type: MATERIAL INVOICE
+Invoice Number: {inv_number}
+Invoice Date: 24-Oct-2026
+Supplier: Kaveri Industrial Components (Synthetic)
+Buyer: Western Route Logistics (Synthetic)
+Loading Point: Erode, Tamil Nadu
+Delivery Point: Chennai, Tamil Nadu
+Vehicle Registration: {truck_no}
+LR Number: {lr_number}
+Taxable Value: INR 48,000.00
+CGST: INR 4,320.00
+SGST: INR 4,320.00
+Invoice Total: {total_val}
+Line Items:
+Description: Industrial fasteners
+Qty: 800 units
+"""
+    page.insert_text((50, 70), text, fontsize=11)
+    pdf_bytes = doc.tobytes()
+    doc.close()
+    return pdf_bytes
+
+
+def create_synthetic_erode_transport_lr_pdf(
+    lr_number: str = "ERD-LR-2026-019427",
+    inv_number: str = "ERD/INV/2026/00481",
+    truck_no: str = "TN 33 AB 1234",
+    weight: str = "1,240 kg",
+    freight: str = "INR 7,500.00",
+) -> bytes:
+    """Generates synthetic Erode Lorry Receipt (LR) PDF."""
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    text = f"""LORRY RECEIPT
+Western Route Logistics (Synthetic)
+SYNTHETIC TEST DOCUMENT - NOT A REAL TAX OR TRANSPORT DOCUMENT
+Document Type: LORRY RECEIPT (LR)
+LR Number: {lr_number}
+LR Date: 24-Oct-2026
+Transporter: Western Route Logistics (Synthetic)
+Consignor: Kaveri Industrial Components (Synthetic)
+Consignee: Chennai Distribution Hub (Synthetic)
+Origin / Loading Point: Erode, Tamil Nadu
+Destination: Chennai, Tamil Nadu
+Vehicle Registration: {truck_no}
+Invoice Reference: {inv_number}
+Packages: 24 cartons
+Gross Weight: {weight}
+Freight Amount: {freight}
+"""
+    page.insert_text((50, 70), text, fontsize=11)
+    pdf_bytes = doc.tobytes()
+    doc.close()
+    return pdf_bytes
+
+
+def create_synthetic_erode_transport_pack_pdf() -> bytes:
+    """Generates 4-page combined Erode transport pack (2 Invoices + 2 LRs)."""
+    doc = fitz.open()
+
+    p1 = fitz.open(stream=create_synthetic_erode_transport_invoice_pdf("ERD/INV/2026/00481", "ERD-LR-2026-019427", "TN 33 AB 1234", "INR 56,640.00"), filetype="pdf")
+    doc.insert_pdf(p1)
+    p1.close()
+
+    p2 = fitz.open(stream=create_synthetic_erode_transport_lr_pdf("ERD-LR-2026-019427", "ERD/INV/2026/00481", "TN 33 AB 1234", "1,240 kg", "INR 7,500.00"), filetype="pdf")
+    doc.insert_pdf(p2)
+    p2.close()
+
+    p3 = fitz.open(stream=create_synthetic_erode_transport_invoice_pdf("ERD/INV/2026/00482", "ERD-LR-2026-019428", "TN 33 CD 5678", "INR 26,550.00"), filetype="pdf")
+    doc.insert_pdf(p3)
+    p3.close()
+
+    p4 = fitz.open(stream=create_synthetic_erode_transport_lr_pdf("ERD-LR-2026-019428", "ERD/INV/2026/00482", "TN 33 CD 5678", "680 kg", "INR 3,200.00"), filetype="pdf")
+    doc.insert_pdf(p4)
+    p4.close()
+
+    pack_bytes = doc.tobytes()
+    doc.close()
+    return pack_bytes
+

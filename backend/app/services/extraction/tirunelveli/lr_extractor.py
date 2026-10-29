@@ -32,9 +32,9 @@ class LorryReceiptExtractor:
                     return item.box
             return None
 
-        # 1. Printed LR Number (e.g. N° 019427, LR No. 019406)
+        # 1. Printed LR Number (e.g. N° 019427, LR No. 019406, ERD-LR-2026-019427)
         lr_match = re.search(
-            r"(?:n[°o\.]?\s*[:\s]*|lr\s*no\.?[:\s]*|consignment\s*note\s*no\.?[:\s]*)(\d{4,8})\b",
+            r"(?:\blr\s*(?:number|no|#)?\.?[:\s]+|\blorry\s*receipt\s+(?:number|no|#)\.?[:\s]+|\bconsignment\s*note\s+(?:number|no|#)\.?[:\s]+|(?<!invoice\s)(?<!inv\s)(?<!inv\.\s)\bn[°o\.]\s*[:\s]*)[\r\n\s]*([A-Za-z0-9/_-]{4,25})\b",
             text,
             re.IGNORECASE,
         )
@@ -57,9 +57,9 @@ class LorryReceiptExtractor:
             )
         )
 
-        # 2. Truck Number (e.g. TN52Y7426, TN 52 Y 7426)
+        # 2. Truck Number (e.g. TN52Y7426, TN 33 AB 1234)
         truck_match = re.search(
-            r"(?:truck\s*(?:number|no)?\.?[:\s]*|vehicle\s*no\.?[:\s]*|\b)([A-Z]{2}\s*\d{1,2}\s*[A-Z]{1,2}\s*\d{4})\b",
+            r"(?:vehicle(?:\s*registration|\s*no)?\.?[:\s]*|truck\s*(?:number|no)?\.?[:\s]*|\b)([A-Z]{2}\s*\d{1,2}\s*[A-Z]{1,2}\s*\d{4})\b",
             text,
             re.IGNORECASE,
         )
@@ -79,16 +79,11 @@ class LorryReceiptExtractor:
         )
 
         # 3. Booking Date
-        date_match = re.search(
-            r"(?:date[:\s]*|\b)(\d{2}[-/\.]\d{2}[-/\.]\d{2,4})\b",
-            text,
-            re.IGNORECASE,
-        )
-        date_str = date_match.group(1) if date_match else "UNKNOWN_DATE"
+        date_str = cls._parse_date(text) or "UNKNOWN_DATE"
         date_field = ExtractedField[str](
             value=date_str,
-            raw_text=date_match.group(0) if date_match else None,
-            confidence=0.92 if date_match else 0.40,
+            raw_text=date_str,
+            confidence=0.92 if date_str != "UNKNOWN_DATE" else 0.40,
             source_page=page_number,
         )
 
@@ -130,7 +125,7 @@ class LorryReceiptExtractor:
 
         # 6. Delivery Place / Unloading Point
         del_match = re.search(
-            r"(?:delivery\s*(?:place|at(?:\s*/?\s*to)?|destination)|unloading\s*point)[:\s]*[\r\n\s]*([^\n]+)",
+            r"(?:destination|delivery\s*(?:place|at(?:\s*/?\s*to)?|point)|unloading\s*point)[:\s]*[\r\n\s]*([^\n\r]+)",
             text,
             re.IGNORECASE,
         )
@@ -165,7 +160,7 @@ class LorryReceiptExtractor:
 
         # 8. LR Weight (kg) - Strictly Cross-Check Weight per PRD
         wt_match = re.search(
-            r"(?:gross\s*wt(?:\(kg\))?|weight(?:\s*in\s*kgs?)?)[:\s]*[\r\n\s]*(\d+[\d,]*\.?\d*)",
+            r"(?:gross\s*wt(?:\(kg\))?|weight(?:\s*in\s*kgs?)?|gross\s*weight)[:\s]*[\r\n\s]*(\d+[\d,]*\.?\d*)",
             text,
             re.IGNORECASE,
         )
@@ -192,18 +187,25 @@ class LorryReceiptExtractor:
             flag_reason="LR weight is a cross-check only; invoice weight governs (PRD §2)",
         )
 
-        # 9. Invoice Numbers (handwritten reference string, e.g. "Inv: 2250601397 to 1400" or "2250601397-1400")
+        # 9. Invoice Numbers (handwritten reference string, e.g. "Inv: 2250601397 to 1400", "ERD/INV/2026/00481", etc.)
         inv_ref_match = re.search(
-            r"(?:inv(?:oices?)?[:\s]*|inv(?:oice)?\s*nos?\.?[:\s]*)([^\r\n]+)",
+            r"(?:invoice\s*reference|inv(?:oices?)?[:\s]|inv(?:oice)?\s*nos?\.?[:\s])[\r\n\s]*([A-Za-z0-9/_-]{6,30})\b",
             text,
             re.IGNORECASE,
         )
         inv_ref_str = ""
         if inv_ref_match:
-            raw_inv_line = inv_ref_match.group(1).strip()
-            # Strip trailing preprinted boilerplate if on same line
-            raw_inv_line = re.split(r"\bto\s+be\s+billed\b", raw_inv_line, flags=re.IGNORECASE)[0].strip()
-            inv_ref_str = raw_inv_line
+            inv_ref_str = inv_ref_match.group(1).strip()
+        else:
+            m_inv_line = re.search(
+                r"(?:inv(?:oices?)?[:\s]*|inv(?:oice)?\s*nos?\.?[:\s]*)([^\r\n]+)",
+                text,
+                re.IGNORECASE,
+            )
+            if m_inv_line:
+                raw_inv_line = m_inv_line.group(1).strip()
+                raw_inv_line = re.split(r"\bto\s+be\s+billed\b", raw_inv_line, flags=re.IGNORECASE)[0].strip()
+                inv_ref_str = raw_inv_line
 
         if not inv_ref_str or not any(c.isdigit() for c in inv_ref_str):
             direct_range = re.search(r"\b(225\d{7}(?:\s*(?:to|-|–)\s*(?:225\d{7}|\d{2,4}))?)\b", text)
@@ -245,6 +247,24 @@ class LorryReceiptExtractor:
             else None
         )
 
+        # 11. Freight Amount
+        frt_match = re.search(
+            r"(?:freight\s*(?:amount|charges?)|add[:\s]*frie?ght)[:\s]*[\r\n\s]*(?:inr|rs\.?)?\s*([\d,]+(?:\.\d+)?)",
+            text,
+            re.IGNORECASE,
+        )
+        frt_num = float(frt_match.group(1).replace(",", "")) if frt_match else None
+        frt_field = (
+            ExtractedField[float](
+                value=frt_num,
+                raw_text=frt_match.group(0),
+                confidence=0.92,
+                source_page=page_number,
+            )
+            if frt_num is not None
+            else None
+        )
+
         return LorryReceiptData(
             lr_number=lr_field,
             truck_number=truck_field,
@@ -256,5 +276,41 @@ class LorryReceiptExtractor:
             weight_kg=wt_field,
             invoice_numbers_raw=inv_ref_field,
             total_value_rs=val_field,
+            freight_amount=frt_field,
             preprinted_freight_ignored=True,
         )
+
+    @staticmethod
+    def _parse_date(text: str) -> Optional[str]:
+        MONTH_MAP = {
+            "jan": "01", "feb": "02", "mar": "03", "apr": "04", "may": "05", "jun": "06",
+            "jul": "07", "aug": "08", "sep": "09", "oct": "10", "nov": "11", "dec": "12",
+        }
+        # e.g. 24-Oct-2026, 24 Oct 2026
+        m_mon = re.search(
+            r"(?:lr\s*date|date)?[:\s]*[\r\n\s]*(\d{1,2})[-/\s]([A-Za-z]{3})[a-z]*[-/\s](\d{2,4})\b",
+            text,
+            re.IGNORECASE,
+        )
+        if m_mon:
+            mth = MONTH_MAP.get(m_mon.group(2).lower()[:3])
+            if mth:
+                d = int(m_mon.group(1))
+                y = m_mon.group(3)
+                if len(y) == 2:
+                    y = f"20{y}"
+                return f"{d:02d}/{mth}/{y}"
+        # e.g. 24/10/2026, 24-10-2026
+        m_num = re.search(
+            r"(?:date[:\s]*|\b)(\d{1,2})[-/\.](\d{1,2})[-/\.](\d{2,4})\b",
+            text,
+            re.IGNORECASE,
+        )
+        if m_num:
+            d = int(m_num.group(1))
+            m = int(m_num.group(2))
+            y = m_num.group(3)
+            if len(y) == 2:
+                y = f"20{y}"
+            return f"{d:02d}/{m:02d}/{y}"
+        return None

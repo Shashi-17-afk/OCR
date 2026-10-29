@@ -259,6 +259,28 @@ class TirunelveliDocumentLinker:
                         )
                     expanded_invoice_ranges[cid] = exp_res.expanded_numbers
 
+            # When no physical LR pages exist in the upload (e.g. invoice-only upload or single-page invoice),
+            # synthesize consignments from the invoices' printed LR numbers so confirmed consignments are produced.
+            if not lr_pages and inv_pages:
+                seen_printed_lrs: dict[str, LRNumberField] = {}
+                for inv_p in inv_pages:
+                    if inv_p.invoice_data and inv_p.invoice_data.printed_lr_number:
+                        p_lr = inv_p.invoice_data.printed_lr_number
+                        if p_lr.normalized_value not in seen_printed_lrs:
+                            seen_printed_lrs[p_lr.normalized_value] = p_lr
+
+                for idx, (norm_val, p_lr) in enumerate(seen_printed_lrs.items()):
+                    cid = f"CONSIGNMENT_{truck_plate}_{norm_val}_{idx+1}"
+                    consignment = LinkedConsignment(
+                        consignment_id=cid,
+                        source_page=p_lr.source_page,
+                        lr_record=None,
+                        lr_number=p_lr,
+                        is_collision=False,
+                    )
+                    consignments.append(consignment)
+                    consignments_by_norm.setdefault(norm_val, []).append(consignment)
+
             # Check for normalization collisions
             for norm_key, c_list in consignments_by_norm.items():
                 if len(c_list) > 1:

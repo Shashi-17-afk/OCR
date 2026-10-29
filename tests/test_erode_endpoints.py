@@ -5,7 +5,11 @@ from fastapi.testclient import TestClient
 import pytest
 
 from backend.app.main import app
-from tests.fixtures.synthetic_erode import create_synthetic_erode_bundle_pdf
+from tests.fixtures.synthetic_erode import (
+    create_synthetic_erode_bundle_pdf,
+    create_synthetic_erode_transport_invoice_pdf,
+    create_synthetic_erode_transport_pack_pdf,
+)
 from tests.fixtures.synthetic_tirunelveli import create_synthetic_tirunelveli_direct_pdf
 
 client = TestClient(app, raise_server_exceptions=False)
@@ -103,4 +107,79 @@ def test_unified_export_endpoints():
     )
     assert resp2.status_code == status.HTTP_200_OK
     assert "TN52Y7426" in resp2.headers["content-disposition"]
+
+
+def test_erode_single_invoice_reconcile():
+    """Verifies that an uploaded single Erode invoice produces confirmed consignments and page extractions."""
+    pdf_bytes = create_synthetic_erode_transport_invoice_pdf()
+    resp = client.post(
+        "/api/v1/bookings/reconcile?loading_point=erode&booking_type=direct&enable_ocr=false",
+        files={"file": ("erode_invoice_00481.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert resp.status_code == status.HTTP_200_OK
+    data = resp.json()
+
+    assert data["loading_point"] == "erode"
+    assert len(data["truck_dossiers"]) == 1
+    dossier = data["truck_dossiers"][0]
+    assert dossier["truck_number"] == "TN33AB1234"
+    assert len(dossier["reconciled_consignments"]) == 1
+
+    consignment = dossier["reconciled_consignments"][0]
+    assert consignment["lr_number_raw"] == "ERD-LR-2026-019427"
+    assert consignment["compressed_invoices_cell"] == "ERD/INV/2026/00481"
+    assert consignment["total_value_rs"] == 56640.0
+
+    # Ensure page extractions are present for UI inspect modal
+    assert len(data["page_extractions"]) == 1
+    p1 = data["page_extractions"][0]
+    assert p1["classification"]["classification"] == "MATERIAL_INVOICE"
+    assert p1["extracted_data"]["invoice_number"]["value"] == "ERD/INV/2026/00481"
+    assert p1["extracted_data"]["printed_lr_number"]["raw_value"] == "ERD-LR-2026-019427"
+
+
+def test_erode_transport_pack_reconcile_and_export():
+    """Verifies that 4-page Erode combined test pack links LRs, Invoices, calculates freight and exports to Excel."""
+    pdf_bytes = create_synthetic_erode_transport_pack_pdf()
+    resp = client.post(
+        "/api/v1/bookings/reconcile?loading_point=erode&booking_type=direct&enable_ocr=false",
+        files={"file": ("erode_combined_test_pack.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert resp.status_code == status.HTTP_200_OK
+    data = resp.json()
+
+    assert data["total_pages_in"] == 4
+    assert data["total_pages_accounted_for"] == 4
+    assert len(data["truck_dossiers"]) == 2
+
+    # Verify dossier 1
+    d1 = data["truck_dossiers"][0]
+    assert d1["truck_number"] == "TN33AB1234"
+    assert d1["truck_total_weight_mt"] == 1.24
+    assert d1["truck_total_value_rs"] == 56640.0
+    assert d1["truck_total_freight_rs"] == 7500.0
+    c1 = d1["reconciled_consignments"][0]
+    assert c1["lr_number_raw"] == "ERD-LR-2026-019427"
+    assert c1["compressed_invoices_cell"] == "ERD/INV/2026/00481"
+    assert c1["freight_amount"] == 7500.0
+
+    # Verify dossier 2
+    d2 = data["truck_dossiers"][1]
+    assert d2["truck_number"] == "TN33CD5678"
+    assert d2["truck_total_weight_mt"] == 0.68
+    assert d2["truck_total_value_rs"] == 26550.0
+    assert d2["truck_total_freight_rs"] == 3200.0
+    c2 = d2["reconciled_consignments"][0]
+    assert c2["lr_number_raw"] == "ERD-LR-2026-019428"
+    assert c2["compressed_invoices_cell"] == "ERD/INV/2026/00482"
+    assert c2["freight_amount"] == 3200.0
+
+    # Verify Excel export
+    export_resp = client.post(
+        "/api/v1/bookings/export-excel?loading_point=erode&booking_type=direct&enable_ocr=false",
+        files={"file": ("erode_combined_test_pack.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert export_resp.status_code == status.HTTP_200_OK
+    assert export_resp.headers["content-type"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
 

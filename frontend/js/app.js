@@ -729,11 +729,12 @@
     const conf = Math.round(pageData.classification.confidence * 100);
     const anchors = (pageData.classification.detected_anchors || []).join(', ');
     const flags = pageData.review_flags || [];
-    const ext = pageData.extracted_data || {};
+    const ext = pageData.extracted_data || pageData.invoice_data || pageData.lr_data || pageData.eway_data || pageData.security_data || {};
 
     let fieldsHtml = '';
     for (const [key, fieldObj] of Object.entries(ext)) {
-      if (fieldObj && typeof fieldObj === 'object' && 'value' in fieldObj) {
+      if (fieldObj && typeof fieldObj === 'object' && ('value' in fieldObj || 'raw_value' in fieldObj)) {
+        const val = 'value' in fieldObj ? fieldObj.value : fieldObj.raw_value;
         const fieldConf = fieldObj.confidence
           ? `${Math.round(fieldObj.confidence * 100)}%`
           : 'High';
@@ -744,7 +745,7 @@
               <span class="field-label">${formatFieldLabel(key)}</span>
               <span class="confidence-chip conf-high">${fieldConf}</span>
             </div>
-            <div class="editable-input" style="background: rgba(255,255,255,0.03);">${fieldObj.value !== null ? fieldObj.value : '—'
+            <div class="editable-input" style="background: rgba(255,255,255,0.03);">${val !== null && val !== undefined ? val : '—'
           }</div>
             ${rawSnippet ? `<div class="raw-snippet">OCR: "${rawSnippet}"</div>` : ''}
           </div>

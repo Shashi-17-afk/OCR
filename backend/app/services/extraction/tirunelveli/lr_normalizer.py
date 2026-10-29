@@ -19,10 +19,10 @@ class LRNormalizer:
         per PRD §4 (e.g. '019427' -> '19427').
         """
         cleaned_raw = raw_text.strip()
-        # Extract alphanumeric core (usually digits for CTLS LRs)
-        digits_match = re.search(r"\d+", cleaned_raw)
-        if digits_match:
-            digits = digits_match.group(0)
+        # Extract alphanumeric core (taking trailing digit sequence if prefixed with year/code, e.g. 'ERD-LR-2026-019427' -> '019427')
+        all_digit_sequences = re.findall(r"\d+", cleaned_raw)
+        if all_digit_sequences:
+            digits = all_digit_sequences[-1]
             normalized = digits.lstrip("0") or "0"
             is_ambiguous = len(digits) < 4
             flag_reason = (

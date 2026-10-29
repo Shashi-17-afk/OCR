@@ -44,6 +44,14 @@ class ErodePageClassifier:
         (r"\bbroker\b", 3.0),
     ]
 
+    INVOICE_ANCHORS = [
+        (r"material\s*invoice", 6.0),
+        (r"document\s*type\s*[:\s]*material\s*invoice", 7.0),
+        (r"invoice\s*(?:number|no)", 4.0),
+        (r"taxable\s*value", 3.5),
+        (r"invoice\s*total", 3.5),
+    ]
+
     @classmethod
     def classify_page(
         cls,
@@ -66,6 +74,7 @@ class ErodePageClassifier:
         scores: dict[PageClassificationType, float] = {
             PageClassificationType.DESPATCH_SHEET: 0.0,
             PageClassificationType.LORRY_RECEIPT: 0.0,
+            PageClassificationType.MATERIAL_INVOICE: 0.0,
         }
         detected_anchors: dict[PageClassificationType, list[str]] = {
             t: [] for t in scores
@@ -82,6 +91,18 @@ class ErodePageClassifier:
             if re.search(pattern, cleaned_text):
                 scores[PageClassificationType.LORRY_RECEIPT] += weight
                 detected_anchors[PageClassificationType.LORRY_RECEIPT].append(pattern)
+
+        # Match Material Invoice anchors
+        for pattern, weight in cls.INVOICE_ANCHORS:
+            if re.search(pattern, cleaned_text):
+                scores[PageClassificationType.MATERIAL_INVOICE] += weight
+                detected_anchors[PageClassificationType.MATERIAL_INVOICE].append(pattern)
+
+        # Boost when explicit title or document type is at top of page
+        if re.search(r"^\s*material\s*invoice|document\s*type\s*[:\s]*material\s*invoice", cleaned_text, re.MULTILINE):
+            scores[PageClassificationType.MATERIAL_INVOICE] += 5.0
+        if re.search(r"^\s*lorry\s*receipt|document\s*type\s*[:\s]*lorry\s*receipt", cleaned_text, re.MULTILINE):
+            scores[PageClassificationType.LORRY_RECEIPT] += 5.0
 
         best_type, top_score = max(scores.items(), key=lambda kv: kv[1])
         all_scores = sorted(scores.values(), reverse=True)

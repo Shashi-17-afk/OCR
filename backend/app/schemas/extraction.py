@@ -1,5 +1,5 @@
 from typing import Any, Generic, Optional, TypeVar
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 from backend.app.schemas.classification import (
     BookingType,
@@ -139,6 +139,9 @@ class LorryReceiptData(BaseModel):
     total_value_rs: Optional[ExtractedField[float]] = Field(
         default=None, description="Handwritten total consignment value"
     )
+    freight_amount: Optional[ExtractedField[float]] = Field(
+        default=None, description="Customer freight amount recorded on LR"
+    )
     preprinted_freight_ignored: bool = Field(
         default=True,
         description="True per PRD: 'TO BE BILLED / UNLOADING BY CONSIGNEE' freight box is ignored",
@@ -160,6 +163,15 @@ class TirunelveliPageExtractionResult(BaseModel):
         default_factory=list,
         description="Flags requiring staff review for this page",
     )
+
+    @computed_field
+    @property
+    def extracted_data(self) -> dict[str, Any]:
+        """Provides flat extracted data dictionary for review UI inspection."""
+        target = self.invoice_data or self.lr_data or self.eway_data or self.security_data
+        if target:
+            return target.model_dump()
+        return {}
 
 
 class TirunelveliExtractionResponse(BaseModel):

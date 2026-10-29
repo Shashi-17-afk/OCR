@@ -27,12 +27,18 @@ class MaterialInvoiceExtractor:
                     return item.box
             return None
 
-        # 1. Invoice Number (10 digits starting with 225... or explicit label)
+        # 1. Invoice Number (supports e.g. 2250123456 or ERD/INV/2026/00481)
         inv_no_match = re.search(
-            r"(?:invoice\s*no\.?[:\s]*|\b)(225\d{7}|\d{10})\b",
+            r"(?:invoice\s*(?:number|no)?\.?[:\s]*|\b)(225\d{7}|\d{10})\b",
             text,
             re.IGNORECASE,
         )
+        if not inv_no_match:
+            inv_no_match = re.search(
+                r"(?:invoice\s*(?:number|no)\.?|inv\s*no\.?)[:\s]*[\r\n\s]*([A-Za-z0-9/_-]*\d[A-Za-z0-9/_-]*)\b",
+                text,
+                re.IGNORECASE,
+            )
         inv_no_str = inv_no_match.group(1) if inv_no_match else "UNKNOWN_INV"
         inv_field = ExtractedField[str](
             value=inv_no_str,
@@ -45,25 +51,20 @@ class MaterialInvoiceExtractor:
         )
 
         # 2. Invoice Date
-        date_match = re.search(
-            r"(?:date[:\s]*|\b)(\d{2}[-/\.]\d{2}[-/\.]\d{2,4})\b",
-            text,
-            re.IGNORECASE,
-        )
-        date_str = date_match.group(1) if date_match else "UNKNOWN_DATE"
+        date_str = cls._parse_date(text) or "UNKNOWN_DATE"
         date_field = ExtractedField[str](
             value=date_str,
-            raw_text=date_match.group(0) if date_match else None,
-            confidence=0.95 if date_match else 0.40,
+            raw_text=date_str,
+            confidence=0.95 if date_str != "UNKNOWN_DATE" else 0.40,
             bounding_box=find_box(r"\d{2}[-/\.]\d{2}[-/\.]\d{2,4}"),
             source_page=page_number,
-            is_ambiguous=date_match is None,
-            flag_reason="Invoice date missing or unreadable" if not date_match else None,
+            is_ambiguous=date_str == "UNKNOWN_DATE",
+            flag_reason="Invoice date missing or unreadable" if date_str == "UNKNOWN_DATE" else None,
         )
 
-        # 3. Vehicle Number (e.g. TN52Y7426)
+        # 3. Vehicle Number (e.g. TN52Y7426, TN 33 AB 1234)
         veh_match = re.search(
-            r"(?:vehicle(?:\s*no)?\.?[:\s]*|\b)([A-Z]{2}\s*\d{2}\s*[A-Z]{1,2}\s*\d{4})\b",
+            r"(?:vehicle(?:\s*registration|\s*no)?\.?[:\s]*|truck\s*no\.?[:\s]*|\b)([A-Z]{2}\s*\d{1,2}\s*[A-Z]{1,2}\s*\d{4})\b",
             text,
             re.IGNORECASE,
         )
@@ -78,9 +79,9 @@ class MaterialInvoiceExtractor:
             flag_reason="Vehicle plate number missing on invoice" if not veh_match else None,
         )
 
-        # 4. Printed LR Number (e.g., LR No: 019427, LR/TransportDocNo: 019427, or 19427)
+        # 4. Printed LR Number (e.g., LR No: 019427, ERD-LR-2026-019427, or 19427)
         lr_match = re.search(
-            r"(?:lr\s*(?:/|\s*)?(?:transport\s*doc\s*no\.?|no\.?)[:\s]*|lorry\s*receipt\s*no\.?[:\s]*|\blr\s*#?\s*)[\r\n\s]*(\d{4,8})\b",
+            r"(?:\blr\s*(?:number|no|#)?\.?[:\s]+|\blorry\s*receipt\s+(?:number|no|#)\.?[:\s]+|\bconsignment\s*note\s+(?:number|no|#)\.?[:\s]+)[\r\n\s]*([A-Za-z0-9/_-]{4,25})\b",
             text,
             re.IGNORECASE,
         )
@@ -119,7 +120,7 @@ class MaterialInvoiceExtractor:
 
         # 6. Bill To Party
         bill_to_match = re.search(
-            r"bill\s*to[:\s]*[\r\n\s]*([^\n\r]+)",
+            r"(?:buyer|bill\s*to)[:\s]*[\r\n\s]*([^\n\r]+)",
             text,
             re.IGNORECASE,
         )
@@ -138,7 +139,7 @@ class MaterialInvoiceExtractor:
 
         # 7. Ship To Party
         ship_to_match = re.search(
-            r"ship\s*to(?:\s*/\s*delivery)?[:\s]*[\r\n\s]*([^\n\r]+)",
+            r"(?:delivery\s*point|destination|ship\s*to(?:\s*/\s*delivery)?)[:\s]*[\r\n\s]*([^\n\r]+)",
             text,
             re.IGNORECASE,
         )
@@ -159,8 +160,8 @@ class MaterialInvoiceExtractor:
         pkg_count = 0
         pkg_desc = "0 packages"
 
-        # Pattern A: Quantity column in goods table, e.g. 40REELS, 120BALES, 80REELS, 100BUNDLES
-        qty_match = re.search(r"\b(\d+)\s*(reels?|bales?|bundles?|packs?)\b", text, re.IGNORECASE)
+        # Pattern A: Quantity column in goods table, e.g. 800 units, 40REELS, 120BALES, 80REELS, 100BUNDLES
+        qty_match = re.search(r"\b(\d+)\s*(units?|reels?|bales?|bundles?|packs?|boxes?|cartons?)\b", text, re.IGNORECASE)
         if qty_match:
             pkg_count = int(qty_match.group(1))
             pkg_desc = f"{pkg_count} {qty_match.group(2).lower()}"
@@ -271,9 +272,9 @@ class MaterialInvoiceExtractor:
 
         # 11. Net Claim Rs / Invoice Total
         claim_val = 0.0
-        # Check standard invoice total / net claim headers (accounting for currency/glyph prefixes like I, ₹, Rs., |)
+        # Check standard invoice total / net claim headers (accounting for currency/glyph prefixes like INR, I, ₹, Rs., |)
         m_nc = re.search(
-            r"(?:invoice\s*total|net\s*claim(?:\s*rs\.?)?|total\s*(?:invoice)?\s*(?:value|amount)|grand\s*total)[:\s]*[\r\n\s]*[iI|₹Rs\.]*\s*([\d,]+\.\d{2}|[\d,]+)",
+            r"(?:invoice\s*total|net\s*claim(?:\s*rs\.?)?|total\s*(?:invoice)?\s*(?:value|amount)|grand\s*total)[:\s]*[\r\n\s]*(?:inr|rs\.?|[iI|₹Rs\.])*\s*([\d,]+(?:\.\d+)?)",
             text,
             re.IGNORECASE,
         )
@@ -332,3 +333,38 @@ class MaterialInvoiceExtractor:
             freight_amount=frt_field,
             net_claim_rs=claim_field,
         )
+
+    @staticmethod
+    def _parse_date(text: str) -> Optional[str]:
+        MONTH_MAP = {
+            "jan": "01", "feb": "02", "mar": "03", "apr": "04", "may": "05", "jun": "06",
+            "jul": "07", "aug": "08", "sep": "09", "oct": "10", "nov": "11", "dec": "12",
+        }
+        # e.g. 24-Oct-2026, 24 Oct 2026
+        m_mon = re.search(
+            r"(?:invoice\s*date|date)?[:\s]*[\r\n\s]*(\d{1,2})[-/\s]([A-Za-z]{3})[a-z]*[-/\s](\d{2,4})\b",
+            text,
+            re.IGNORECASE,
+        )
+        if m_mon:
+            mth = MONTH_MAP.get(m_mon.group(2).lower()[:3])
+            if mth:
+                d = int(m_mon.group(1))
+                y = m_mon.group(3)
+                if len(y) == 2:
+                    y = f"20{y}"
+                return f"{d:02d}/{mth}/{y}"
+        # e.g. 24/10/2026, 24-10-2026
+        m_num = re.search(
+            r"(?:date[:\s]*|\b)(\d{1,2})[-/\.](\d{1,2})[-/\.](\d{2,4})\b",
+            text,
+            re.IGNORECASE,
+        )
+        if m_num:
+            d = int(m_num.group(1))
+            m = int(m_num.group(2))
+            y = m_num.group(3)
+            if len(y) == 2:
+                y = f"20{y}"
+            return f"{d:02d}/{m:02d}/{y}"
+        return None

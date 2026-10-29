@@ -19,6 +19,8 @@ class TirunelveliPageClassifier:
 
     # Primary anchors with positive weights
     INVOICE_ANCHORS = [
+        (r"material\s*invoice", 6.0),
+        (r"document\s*type\s*[:\s]*material\s*invoice", 7.0),
         (r"tax\s*invoice\s*[-–]?\s*transport\s*copy", 6.0),
         (r"tax\s*invoice", 4.0),
         (r"original\s*(?:for\s*)?transporter", 4.0),
@@ -134,6 +136,12 @@ class TirunelveliPageClassifier:
             if re.search(pattern, cleaned_text):
                 scores[PageClassificationType.LORRY_RECEIPT] += weight
                 detected_anchors[PageClassificationType.LORRY_RECEIPT].append(pattern)
+
+        # Boost when explicit title or document type is at top of page
+        if re.search(r"^\s*material\s*invoice|document\s*type\s*[:\s]*material\s*invoice", cleaned_text, re.MULTILINE):
+            scores[PageClassificationType.MATERIAL_INVOICE] += 5.0
+        if re.search(r"^\s*lorry\s*receipt|document\s*type\s*[:\s]*lorry\s*receipt", cleaned_text, re.MULTILINE):
+            scores[PageClassificationType.LORRY_RECEIPT] += 5.0
 
         # Rank types by score
         ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)

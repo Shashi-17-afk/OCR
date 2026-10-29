@@ -187,9 +187,12 @@ class TirunelveliReconciliationEngine:
         # 2. Weight Precedence & Unit Conversion (PRD §2, §4, §5.5)
         # -------------------------------------------------------------
         gov_gross_kg = sum(inv.gross_weight_kg.value for inv in canonical_invoices)
+        lr_rec = consignment.lr_record
+        if gov_gross_kg == 0.0 and lr_rec and lr_rec.weight_kg and lr_rec.weight_kg.value:
+            gov_gross_kg = lr_rec.weight_kg.value
+
         gov_gross_mt = round(gov_gross_kg / 1000.0, 3)
 
-        lr_rec = consignment.lr_record
         lr_weight_kg = lr_rec.weight_kg.value if (lr_rec and lr_rec.weight_kg) else None
         weight_matches_lr = True
 
@@ -210,6 +213,9 @@ class TirunelveliReconciliationEngine:
         # 3. Freight Rules (PRD §5.4)
         # -------------------------------------------------------------
         freight_sum = sum(inv.freight_amount.value for inv in canonical_invoices)
+        if freight_sum == 0.0 and lr_rec and lr_rec.freight_amount and lr_rec.freight_amount.value:
+            freight_sum = lr_rec.freight_amount.value
+
         is_party_freight = (freight_sum == 0.0)
         is_split_freight = False
 
@@ -226,13 +232,17 @@ class TirunelveliReconciliationEngine:
         # -------------------------------------------------------------
         # 4. Delivery Destination, Ship-To & Bill-To Discrepancy (PRD §5.4)
         # -------------------------------------------------------------
-        raw_del = lr_rec.delivery_place.value if (lr_rec and lr_rec.delivery_place) else ""
         raw_consignee = lr_rec.consignee.value if (lr_rec and lr_rec.consignee) else ""
         raw_bill_to = canonical_invoices[0].bill_to_party.value if canonical_invoices else raw_consignee
         raw_ship_to = (
             canonical_invoices[0].ship_to_party.value
             if (canonical_invoices and canonical_invoices[0].ship_to_party and canonical_invoices[0].ship_to_party.value)
-            else (raw_consignee or raw_del)
+            else (raw_consignee or (lr_rec.delivery_place.value if lr_rec and lr_rec.delivery_place else ""))
+        )
+        raw_del = (
+            lr_rec.delivery_place.value
+            if (lr_rec and lr_rec.delivery_place and lr_rec.delivery_place.value)
+            else raw_ship_to
         )
 
         del_place = PartyNameNormalizer.normalize(raw_del)

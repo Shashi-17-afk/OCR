@@ -118,25 +118,28 @@ class InvoiceRangeExpander:
                     error_message=f"Malformed invoice range: end '{end_str}' longer than start '{start_str}'",
                 )
 
-        # Check for discrete list of numbers (separated by comma, semicolon, space, or slash)
-        # e.g. "2250501852, 2250501853" or "2250501852"
-        tokens = re.split(r"[\s,;]+", content)
-        all_digits = [t for t in tokens if t.isdigit()]
+        # Check for discrete list of numbers/alphanumeric invoice IDs (separated by comma, semicolon, space)
+        # e.g. "2250501852, 2250501853" or "2250501852" or "ERD/INV/2026/00481"
+        def is_valid_inv_token(t: str) -> bool:
+            return bool(re.match(r"^[A-Za-z0-9/_-]{4,30}$", t) and any(c.isdigit() for c in t))
 
-        # If there are non-digit tokens that look like text instructions, mark as ambiguous
-        non_digits = [t for t in tokens if t and not t.isdigit() and t.lower() not in {"and", "&"}]
-        if non_digits:
+        tokens = re.split(r"[\s,;]+", content)
+        all_invs = [t for t in tokens if is_valid_inv_token(t)]
+
+        # If there are tokens that look like text instructions, mark as ambiguous
+        non_invs = [t for t in tokens if t and not is_valid_inv_token(t) and t.lower() not in {"and", "&"}]
+        if non_invs:
             return RangeExpansionResult(
                 raw_text=cleaned,
-                expanded_numbers=all_digits,
+                expanded_numbers=all_invs,
                 is_ambiguous=True,
-                error_message=f"Unrecognized non-numeric tokens in invoice list: {non_digits}",
+                error_message=f"Unrecognized non-numeric tokens in invoice list: {non_invs}",
             )
 
-        if all_digits:
+        if all_invs:
             return RangeExpansionResult(
                 raw_text=cleaned,
-                expanded_numbers=all_digits,
+                expanded_numbers=all_invs,
                 is_ambiguous=False,
                 error_message=None,
             )

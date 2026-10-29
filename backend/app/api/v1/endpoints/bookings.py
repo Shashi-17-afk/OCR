@@ -2,10 +2,17 @@ from fastapi import APIRouter, Body, File, HTTPException, Query, Response, Uploa
 
 from backend.app.core.config import settings
 from backend.app.core.logging import logger
-from backend.app.schemas.classification import BookingType, LoadingPoint
+from backend.app.schemas.classification import (
+    BookingType,
+    LoadingPoint,
+    PageClassificationResult,
+)
 from backend.app.schemas.error import ErrorResponse
 from backend.app.schemas.erode_extraction import ErodeExtractionResponse
-from backend.app.schemas.extraction import TirunelveliExtractionResponse
+from backend.app.schemas.extraction import (
+    TirunelveliExtractionResponse,
+    TirunelveliPageExtractionResult,
+)
 from backend.app.schemas.hierarchy import TirunelveliHierarchyResponse
 from backend.app.schemas.reconciliation import (
     ReconciliationStatus,
@@ -554,29 +561,60 @@ async def reconcile_erode_document(
             booking_type=booking_type,
             enable_ocr=enable_ocr,
         )
-        dossier = ErodeReconciler.reconcile(
-            lr_sheet=extract_res.lr_sheet,
-            despatch_sheet=extract_res.despatch_sheet,
-            booking_type=booking_type,
-        )
 
-        all_notes = [note for c in dossier.reconciled_consignments for note in c.audit_notes]
-        overall_status = ReconciliationStatus.CONFIRMED
-        if any(c.status != ReconciliationStatus.CONFIRMED for c in dossier.reconciled_consignments):
-            overall_status = ReconciliationStatus.REVIEW_REQUIRED_DISCREPANCY
+        if extract_res.despatch_sheet is not None or (extract_res.lr_sheet and extract_res.lr_sheet.rows):
+            dossier = ErodeReconciler.reconcile(
+                lr_sheet=extract_res.lr_sheet,
+                despatch_sheet=extract_res.despatch_sheet,
+                booking_type=booking_type,
+            )
 
-        total_pages = len(extract_res.pages)
-        return TirunelveliReconciliationResponse(
-            document_id=extract_res.document_id,
-            original_filename=filename,
-            loading_point=LoadingPoint.ERODE,
-            booking_type=booking_type,
-            truck_dossiers=[dossier],
-            total_pages_in=total_pages,
-            total_pages_accounted_for=total_pages,
-            global_reconciliation_flags=all_notes,
-            unassigned_pages=[],
-        )
+            all_notes = [note for c in dossier.reconciled_consignments for note in c.audit_notes]
+            overall_status = ReconciliationStatus.CONFIRMED
+            if any(c.status != ReconciliationStatus.CONFIRMED for c in dossier.reconciled_consignments):
+                overall_status = ReconciliationStatus.REVIEW_REQUIRED_DISCREPANCY
+
+            total_pages = len(extract_res.pages)
+            ui_page_extractions = []
+            for p in extract_res.pages:
+                ui_page_extractions.append(
+                    TirunelveliPageExtractionResult(
+                        page_number=p.page_number,
+                        classification=PageClassificationResult(
+                            page_number=p.page_number,
+                            classification=p.classification,
+                            confidence=p.confidence,
+                            detected_anchors=[],
+                        ),
+                        review_flags=p.warnings,
+                    )
+                )
+
+            return TirunelveliReconciliationResponse(
+                document_id=extract_res.document_id,
+                original_filename=filename,
+                loading_point=LoadingPoint.ERODE,
+                booking_type=booking_type,
+                truck_dossiers=[dossier],
+                total_pages_in=total_pages,
+                total_pages_accounted_for=total_pages,
+                global_reconciliation_flags=all_notes,
+                unassigned_pages=[],
+                page_extractions=ui_page_extractions,
+            )
+        else:
+            # Process transport documents (Material Invoices, Lorry Receipts, E-Way bills)
+            tir_extraction = TirunelveliExtractionService.process(
+                content=content,
+                original_filename=filename,
+                booking_type=booking_type,
+                enable_ocr=enable_ocr,
+            )
+            hierarchy_resp = TirunelveliDocumentLinker.link_documents(tir_extraction)
+            reconciled_resp = TirunelveliReconciliationEngine.reconcile(hierarchy_resp)
+            reconciled_resp.loading_point = LoadingPoint.ERODE
+            reconciled_resp.page_extractions = tir_extraction.pages
+            return reconciled_resp
     except EmptyFileError as err:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err.message) from err
     except UnsupportedFormatError as err:

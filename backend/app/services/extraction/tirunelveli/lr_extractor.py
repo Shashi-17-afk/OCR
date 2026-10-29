@@ -138,23 +138,34 @@ class LorryReceiptExtractor:
         )
 
         # 7. Packages Description
-        pkg_match = re.search(
-            r"(?:no\s*of\s*packages|packages?|description\s*of\s*goods)[:\s]*([^\n]+)",
+        pkg_str = ""
+        pkg_count_match = re.search(
+            r"(?:total\s*(?:package\s*count|packages?)|package\s*count|no\.?\s*of\s*packages?)[:\s]*[\r\n\s]*(\d+)\b",
             text,
             re.IGNORECASE,
         )
-        pkg_str = pkg_match.group(1).strip() if (pkg_match and pkg_match.group(1).strip()) else ""
-        if not pkg_str or pkg_str == "0 packages":
-            tbl_pkg = re.search(r"CONSIGNMENT\s*SUMMARY[\s\S]*?(?:Packages|Gross\s*Wt)[\s\S]*?(\d+)\s+([\d,]+\.\d{2})", text, re.IGNORECASE)
-            if tbl_pkg:
-                pkg_str = f"{tbl_pkg.group(1)} packages"
+        if pkg_count_match:
+            pkg_str = f"{pkg_count_match.group(1)} packages"
+        else:
+            pkg_match = re.search(
+                r"(?:no\s*of\s*packages|packages?|description\s*of\s*goods)[:\s]*([^\n]+)",
+                text,
+                re.IGNORECASE,
+            )
+            raw_pkg = pkg_match.group(1).strip() if (pkg_match and pkg_match.group(1).strip()) else ""
+            if any(c.isdigit() for c in raw_pkg):
+                pkg_str = raw_pkg
             else:
-                pkg_str = "0 packages"
+                tbl_pkg = re.search(r"CONSIGNMENT\s*SUMMARY[\s\S]*?(?:Packages|Gross\s*Wt)[\s\S]*?(\d+)\s+([\d,]+\.\d{2})", text, re.IGNORECASE)
+                if tbl_pkg:
+                    pkg_str = f"{tbl_pkg.group(1)} packages"
+                else:
+                    pkg_str = "0 packages"
 
         pkg_field = ExtractedField[str](
             value=pkg_str,
-            raw_text=pkg_match.group(0) if pkg_match else None,
-            confidence=0.88 if pkg_match else 0.35,
+            raw_text=pkg_str,
+            confidence=0.88 if pkg_str != "0 packages" else 0.35,
             source_page=page_number,
         )
 
@@ -189,7 +200,7 @@ class LorryReceiptExtractor:
 
         # 9. Invoice Numbers (handwritten reference string, e.g. "Inv: 2250601397 to 1400", "ERD/INV/2026/00481", etc.)
         inv_ref_match = re.search(
-            r"(?:invoice\s*(?:reference|numbers?|nos?\.?|#)?|inv(?:oice)?\s*(?:ref\.?|reference|nos?\.?|#)?\.?)[:\s]+[\r\n\s]*([^\r\n]+)",
+            r"(?:invoice\s*(?:reference(?:\(s\))?|numbers?|nos?\.?|#)?|inv(?:oice)?\s*(?:ref\.?|reference(?:\(s\))?|nos?\.?|#)?\.?)[:\s]+[\r\n\s]*([^\r\n]+)",
             text,
             re.IGNORECASE,
         )
@@ -199,6 +210,18 @@ class LorryReceiptExtractor:
             raw_inv = re.split(r"\bto\s+be\s+billed\b", raw_inv, flags=re.IGNORECASE)[0].strip()
             if any(c.isdigit() for c in raw_inv):
                 inv_ref_str = raw_inv
+
+        if not inv_ref_str:
+            m_multiline = re.search(
+                r"(?:invoice\s*(?:reference(?:\(s\))?|numbers?|nos?\.?|#)?|inv(?:oice)?\s*(?:ref\.?|reference(?:\(s\))?|nos?\.?|#)?\.?)[:\s]*[\r\n]+\s*([^\r\n]+)",
+                text,
+                re.IGNORECASE,
+            )
+            if m_multiline:
+                cand = m_multiline.group(1).strip()
+                cand = re.split(r"\bto\s+be\s+billed\b", cand, flags=re.IGNORECASE)[0].strip()
+                if any(c.isdigit() for c in cand):
+                    inv_ref_str = cand
         if not inv_ref_str:
             m_inv_line = re.search(
                 r"(?:inv(?:oices?)?[:\s]*|inv(?:oice)?\s*nos?\.?[:\s]*)([^\r\n]+)",

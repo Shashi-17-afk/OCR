@@ -36,8 +36,32 @@ class InvoiceRangeExpander:
             )
 
         cleaned = raw_text.strip()
-        # Remove common prefixes like 'Inv:', 'Invoices:', 'Inv nos:'
-        content = re.sub(r"^(?:inv(?:oices?)?[:\s]*|inv(?:oice)?\s*nos?\.?[:\s]*)", "", cleaned, flags=re.IGNORECASE).strip()
+        # Remove common prefixes like 'Inv:', 'Invoices:', 'Inv nos:' (require whitespace or colon so 'INV/' prefix is preserved)
+        content = re.sub(r"^(?:inv(?:oices?|ice\s*reference(?:\(s\))?)?[:\s]+|inv(?:oice)?\s*nos?\.?[:\s]+)", "", cleaned, flags=re.IGNORECASE).strip()
+
+        # Check for alphanumeric prefixed range: e.g. 'INV/2026/00601 to INV/2026/00603' or 'INV/2026/00601 to 00603'
+        pfx_match = re.match(
+            r"^([A-Za-z0-9/_-]*?[A-Za-z/_-]+)(\d+)\s*(?:to|-|–)\s*(?:([A-Za-z0-9/_-]*?[A-Za-z/_-]+))?(\d+)$",
+            content,
+            re.IGNORECASE,
+        )
+        if pfx_match:
+            pfx1, d1, pfx2, d2 = pfx_match.groups()
+            prefix = pfx1
+            if not pfx2 or pfx1.upper() == pfx2.upper():
+                s_val = int(d1)
+                e_val = int(d2)
+                pad_len = len(d1)
+                if e_val >= s_val:
+                    span = e_val - s_val + 1
+                    if span <= cls.MAX_SAFE_SPAN:
+                        expanded = [f"{prefix}{v:0{pad_len}d}" for v in range(s_val, e_val + 1)]
+                        return RangeExpansionResult(
+                            raw_text=cleaned,
+                            expanded_numbers=expanded,
+                            is_ambiguous=False,
+                            error_message=None,
+                        )
 
         # Check for range syntax: 'START to END' or 'START - END' or 'START / END'
         range_match = re.search(r"^(\d+)\s*(?:to|-|–|/)\s*(\d+)$", content, re.IGNORECASE)

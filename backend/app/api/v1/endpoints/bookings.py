@@ -625,6 +625,8 @@ async def reconcile_erode_document(
             hierarchy_resp = TirunelveliDocumentLinker.link_documents(tir_extraction)
             reconciled_resp = TirunelveliReconciliationEngine.reconcile(hierarchy_resp)
             reconciled_resp.loading_point = LoadingPoint.ERODE
+            for d in reconciled_resp.truck_dossiers:
+                d.loading_point = LoadingPoint.ERODE
             reconciled_resp.page_extractions = tir_extraction.pages
             return reconciled_resp
     except EmptyFileError as err:

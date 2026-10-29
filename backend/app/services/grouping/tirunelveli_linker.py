@@ -56,6 +56,7 @@ class TirunelveliDocumentLinker:
         truck_groups: dict[tuple[str, str], list[TirunelveliPageExtractionResult]] = {}
         ewb_deferred_pages: list[TirunelveliPageExtractionResult] = []
         inv_deferred_pages: list[TirunelveliPageExtractionResult] = []
+        lr_deferred_pages: list[TirunelveliPageExtractionResult] = []
 
         for p in pages:
             if p.classification.classification == PageClassificationType.EWAY_BILL:
@@ -70,6 +71,9 @@ class TirunelveliDocumentLinker:
                     # Invoices may not declare the truck plate on the invoice page (assigned at gate on LR/EWB)
                     # Defer linking until truck groups are established by LR / Security Copy
                     inv_deferred_pages.append(p)
+                elif p.classification.classification == PageClassificationType.LORRY_RECEIPT:
+                    # LR may have truck plate without explicit date or be deferred until invoice establishes pickup date
+                    lr_deferred_pages.append(p)
                 else:
                     page_accounting[p.page_number] = "unassigned"
                     unassigned_pool.append(
@@ -82,6 +86,64 @@ class TirunelveliDocumentLinker:
             else:
                 key = (truck_plate, date_str)
                 truck_groups.setdefault(key, []).append(p)
+
+        # Associate deferred Lorry Receipts to their truck group
+        for lr_p in lr_deferred_pages:
+            lr_data = lr_p.lr_data
+            raw_truck = (
+                lr_data.truck_number.value
+                if (lr_data and lr_data.truck_number and lr_data.truck_number.value != "UNKNOWN_TRUCK")
+                else None
+            )
+            norm_truck = re.sub(r"\s+", "", raw_truck.upper()) if raw_truck else None
+            lr_norm = (
+                lr_data.lr_number.normalized_value
+                if (lr_data and lr_data.lr_number)
+                else None
+            )
+
+            matched_key = None
+
+            # 1. Match by vehicle plate
+            if norm_truck:
+                matching_keys = [k for k in truck_groups if k[0] == norm_truck]
+                if len(matching_keys) == 1:
+                    matched_key = matching_keys[0]
+
+            # 2. Match by invoice printed LR in truck group
+            if not matched_key and lr_norm:
+                matching_keys = [
+                    k for k, g_pages in truck_groups.items()
+                    if any(
+                        p.invoice_data
+                        and p.invoice_data.printed_lr_number
+                        and p.invoice_data.printed_lr_number.normalized_value == lr_norm
+                        for p in g_pages
+                    )
+                ]
+                if len(matching_keys) == 1:
+                    matched_key = matching_keys[0]
+
+            # 3. Single truck group fallback
+            if not matched_key and len(truck_groups) == 1:
+                matched_key = list(truck_groups.keys())[0]
+
+            # 4. If truck_groups is still empty but norm_truck exists, create the truck group
+            if not matched_key and norm_truck:
+                matched_key = (norm_truck, "UNKNOWN_DATE")
+                truck_groups.setdefault(matched_key, [])
+
+            if matched_key:
+                truck_groups[matched_key].append(lr_p)
+            else:
+                page_accounting[lr_p.page_number] = "unassigned"
+                unassigned_pool.append(
+                    UnassignedPage(
+                        page_number=lr_p.page_number,
+                        page_result=lr_p,
+                        unassigned_reason=f"Page {lr_p.page_number}: Lorry receipt could not be linked to any truck dossier",
+                    )
+                )
 
         # Associate deferred Material Invoices to their truck group via printed LR or LR invoice list
         for inv_p in inv_deferred_pages:
@@ -98,8 +160,20 @@ class TirunelveliDocumentLinker:
             )
 
             matched_key = None
+            # 0. Match by vehicle plate on invoice
+            raw_truck = (
+                inv_data.vehicle_number.value
+                if (inv_data and inv_data.vehicle_number and inv_data.vehicle_number.value != "UNKNOWN_VEHICLE")
+                else None
+            )
+            norm_truck = re.sub(r"\s+", "", raw_truck.upper()) if raw_truck else None
+            if norm_truck:
+                matching_keys = [k for k in truck_groups if k[0] == norm_truck]
+                if len(matching_keys) == 1:
+                    matched_key = matching_keys[0]
+
             # 1. Match by printed LR number on invoice
-            if inv_lr_norm:
+            if not matched_key and inv_lr_norm:
                 matching_keys = [
                     k for k, g_pages in truck_groups.items()
                     if any(
@@ -130,6 +204,16 @@ class TirunelveliDocumentLinker:
                 matched_key = single_key
 
             if matched_key:
+                if (
+                    matched_key[1] == "UNKNOWN_DATE"
+                    and inv_data
+                    and inv_data.invoice_date
+                    and inv_data.invoice_date.value != "UNKNOWN_DATE"
+                ):
+                    real_d = re.sub(r"\s+", "", inv_data.invoice_date.value)
+                    new_key = (matched_key[0], real_d)
+                    truck_groups[new_key] = truck_groups.pop(matched_key)
+                    matched_key = new_key
                 truck_groups[matched_key].append(inv_p)
             else:
                 page_accounting[inv_p.page_number] = "unassigned"

@@ -160,17 +160,36 @@ class MaterialInvoiceExtractor:
         pkg_count = 0
         pkg_desc = "0 packages"
 
-        # Pattern A: Quantity column in goods table, e.g. 800 units, 40REELS, 120BALES, 80REELS, 100BUNDLES
-        qty_match = re.search(r"\b(\d+)\s*(units?|reels?|bales?|bundles?|packs?|boxes?|cartons?)\b", text, re.IGNORECASE)
-        if qty_match:
-            pkg_count = int(qty_match.group(1))
-            pkg_desc = f"{pkg_count} {qty_match.group(2).lower()}"
+        # Pattern A: Labeled Packages with specific unit (e.g. "Packages: 29 reels", "Total: 120 bales")
+        unit_m = re.search(
+            r"(?:total\s*(?:package\s*count|packages?|qty)|no\.?\s*of\s*packages?|package\s*count|packages?)[:\s]*[\r\n\s]*(\d+)\s*(reels?|bales?|bundles?|units?|packs?|boxes?|cartons?)\b",
+            text,
+            re.IGNORECASE,
+        )
+        if unit_m:
+            pkg_count = int(unit_m.group(1))
+            pkg_desc = f"{pkg_count} {unit_m.group(2).lower()}"
         else:
-            # Pattern B: Labeled Packages header
-            lbl_match = re.search(r"packages?[:\s]*[\r\n\s]*(?:[^\d\n\r]*[\r\n\s]+)?(\d+)\b", text, re.IGNORECASE)
+            # Pattern B: Labeled Total Packages header without immediate unit (e.g. "Total package count: 340", "Total packages: 100")
+            lbl_match = re.search(
+                r"(?:total\s*(?:package\s*count|packages?|qty)|no\.?\s*of\s*packages?|package\s*count|packages?)[:\s]*[\r\n\s]*(?:[^\d\n\r]*[\r\n\s]+)?(\d+)\b",
+                text,
+                re.IGNORECASE,
+            )
+            table_unit_m = re.search(
+                r"\b\d+\s*(reels?|bales?|bundles?|units?|packs?|boxes?|cartons?)\b",
+                text,
+                re.IGNORECASE,
+            )
+            unit_name = table_unit_m.group(1).lower() if table_unit_m else "packages"
+
             if lbl_match:
                 pkg_count = int(lbl_match.group(1))
-                pkg_desc = f"{pkg_count} packages"
+                pkg_desc = f"{pkg_count} {unit_name}"
+            elif table_unit_m:
+                # Pattern C: Table quantity column alone
+                pkg_count = int(re.search(r"\b(\d+)", table_unit_m.group(0)).group(1))
+                pkg_desc = f"{pkg_count} {unit_name}"
 
         pkg_desc_field = ExtractedField[str](
             value=pkg_desc,

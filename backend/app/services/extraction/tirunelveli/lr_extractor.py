@@ -34,7 +34,7 @@ class LorryReceiptExtractor:
 
         # 1. Printed LR Number (e.g. N° 019427, LR No. 019406, ERD-LR-2026-019427)
         lr_match = re.search(
-            r"(?:\blr\s*(?:number|no|#)?\.?[:\s]+|\blorry\s*receipt\s+(?:number|no|#)\.?[:\s]+|\bconsignment\s*note\s+(?:number|no|#)\.?[:\s]+|(?<!invoice\s)(?<!inv\s)(?<!inv\.\s)\bn[°o\.]\s*[:\s]*)[\r\n\s]*([A-Za-z0-9/_-]{4,25})\b",
+            r"(?:\blr\s*(?:/\s*consignment)?\s*(?:number|no|#)?\.?[:\s]+|\blorry\s*receipt\s+(?:number|no|#)\.?[:\s]+|\bconsignment\s*(?:note\s+)?(?:number|no|#)\.?[:\s]+|\bN°\s*|\bNo\.\s*(?=\d)|\bNo[:\s]+(?=\d))[\r\n\s]*([A-Za-z0-9/_-]{4,25})\b",
             text,
             re.IGNORECASE,
         )
@@ -189,14 +189,17 @@ class LorryReceiptExtractor:
 
         # 9. Invoice Numbers (handwritten reference string, e.g. "Inv: 2250601397 to 1400", "ERD/INV/2026/00481", etc.)
         inv_ref_match = re.search(
-            r"(?:invoice\s*reference|inv(?:oices?)?[:\s]|inv(?:oice)?\s*nos?\.?[:\s])[\r\n\s]*([A-Za-z0-9/_-]{6,30})\b",
+            r"(?:invoice\s*(?:reference|numbers?|nos?\.?|#)?|inv(?:oice)?\s*(?:ref\.?|reference|nos?\.?|#)?\.?)[:\s]+[\r\n\s]*([^\r\n]+)",
             text,
             re.IGNORECASE,
         )
         inv_ref_str = ""
         if inv_ref_match:
-            inv_ref_str = inv_ref_match.group(1).strip()
-        else:
+            raw_inv = inv_ref_match.group(1).strip()
+            raw_inv = re.split(r"\bto\s+be\s+billed\b", raw_inv, flags=re.IGNORECASE)[0].strip()
+            if any(c.isdigit() for c in raw_inv):
+                inv_ref_str = raw_inv
+        if not inv_ref_str:
             m_inv_line = re.search(
                 r"(?:inv(?:oices?)?[:\s]*|inv(?:oice)?\s*nos?\.?[:\s]*)([^\r\n]+)",
                 text,

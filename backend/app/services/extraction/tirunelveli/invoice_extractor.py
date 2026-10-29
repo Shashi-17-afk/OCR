@@ -120,7 +120,7 @@ class MaterialInvoiceExtractor:
 
         # 6. Bill To Party
         bill_to_match = re.search(
-            r"(?:buyer|bill\s*to)[:\s]*[\r\n\s]*([^\n\r]+)",
+            r"(?:\bbill\s*to|\bbuyer)(?:[:\.-]|\s*[\r\n]+)\s*([^\n\r]+)",
             text,
             re.IGNORECASE,
         )
@@ -139,7 +139,7 @@ class MaterialInvoiceExtractor:
 
         # 7. Ship To Party
         ship_to_match = re.search(
-            r"(?:delivery\s*point|destination|ship\s*to(?:\s*/\s*delivery)?)[:\s]*[\r\n\s]*([^\n\r]+)",
+            r"(?:delivery\s*point|destination|ship\s*to(?:\s*/\s*delivery)?)(?:[:\.-]|\s*[\r\n]+)\s*([^\n\r]+)",
             text,
             re.IGNORECASE,
         )

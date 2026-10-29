@@ -562,7 +562,19 @@ async def reconcile_erode_document(
             enable_ocr=enable_ocr,
         )
 
-        if extract_res.despatch_sheet is not None or (extract_res.lr_sheet and extract_res.lr_sheet.rows):
+        is_mill_bundle = (
+            extract_res.despatch_sheet is not None
+            or (
+                extract_res.lr_sheet is not None
+                and extract_res.lr_sheet.rows
+                and (
+                    extract_res.lr_sheet.owner_name is not None
+                    or extract_res.lr_sheet.driver_name is not None
+                )
+            )
+        )
+
+        if is_mill_bundle:
             dossier = ErodeReconciler.reconcile(
                 lr_sheet=extract_res.lr_sheet,
                 despatch_sheet=extract_res.despatch_sheet,

@@ -2,7 +2,7 @@ import uuid
 from typing import Optional
 from pydantic import BaseModel, Field
 
-from backend.app.schemas.classification import PageClassificationType
+from backend.app.schemas.classification import BookingType, PageClassificationType
 
 
 class ErodeDespatchRow(BaseModel):
@@ -120,6 +120,17 @@ class ErodePageExtraction(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class ErodeTruckBundle(BaseModel):
+    """A partitioned shipment group comprising 1 or more LR sheets and 1 Despatch Details sheet."""
+
+    truck_number: str = Field(description="Normalized governing truck registration number")
+    booking_date: Optional[str] = Field(default=None, description="Trip booking date (DD/MM/YYYY)")
+    booking_type: BookingType = Field(default=BookingType.GROUP, description="Direct vs Group booking mode")
+    lr_sheets: list[ErodeLRSheet] = Field(default_factory=list, description="LR sheets and continuation pages")
+    despatch_sheet: Optional[ErodeDespatchSheet] = Field(default=None, description="Despatch Details sheet")
+    page_numbers: list[int] = Field(default_factory=list, description="All physical page numbers for this truck")
+
+
 class ErodeExtractionResponse(BaseModel):
     """Full extraction response for an Erode document bundle."""
 
@@ -130,6 +141,7 @@ class ErodeExtractionResponse(BaseModel):
     booking_type: str = Field(description="Staff selected booking type ('direct' or 'group')")
     despatch_sheet: Optional[ErodeDespatchSheet] = None
     lr_sheet: Optional[ErodeLRSheet] = None
+    truck_bundles: list[ErodeTruckBundle] = Field(default_factory=list, description="Partitioned shipments for each truck")
     pages: list[ErodePageExtraction] = Field(default_factory=list)
     extraction_warnings: list[str] = Field(default_factory=list)
 

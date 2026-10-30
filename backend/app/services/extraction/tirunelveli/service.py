@@ -38,10 +38,11 @@ class TirunelveliExtractionService:
         cls,
         content: bytes,
         original_filename: str,
-        booking_type: BookingType,
+        booking_type: Optional[BookingType] = None,
         enable_ocr: bool = True,
     ) -> TirunelveliExtractionResponse:
         """Processes a multi-page document for Tirunelveli loading point."""
+        eff_booking_type = booking_type if (booking_type and booking_type != BookingType.AUTO) else BookingType.DIRECT
         # Step 1: Ingest document and extract text / bounding boxes
         ingest_result = DocumentIngestionService.process_document(
             content=content,
@@ -152,7 +153,7 @@ class TirunelveliExtractionService:
             document_id=ingest_result.document_id,
             original_filename=ingest_result.original_filename,
             loading_point=LoadingPoint.TIRUNELVELI,
-            booking_type=booking_type,
+            booking_type=eff_booking_type,
             page_count=ingest_result.page_count,
             pages=page_results,
             global_review_flags=global_flags,

@@ -10,13 +10,14 @@
   const state = {
     selectedFile: null,
     fileBlobUrl: null,
-    bookingType: 'direct',
+    bookingType: 'auto',
     loadingPoint: 'tirunelveli',
     enableOcr: true,
     currentPage: 1,
     totalPages: 1,
     reconciliationData: null,
     workingConsignments: [],
+    activeTruckIndex: 0,
   };
 
   // DOM Elements
@@ -40,6 +41,7 @@
     processingStep: document.getElementById('processingStep'),
 
     // Review Toolbar
+    truckSelectorBar: document.getElementById('truckSelectorBar'),
     backToUploadBtn: document.getElementById('backToUploadBtn'),
     barDocName: document.getElementById('barDocName'),
     barTruckPlate: document.getElementById('barTruckPlate'),
@@ -93,22 +95,28 @@
 
   // Booking Type Toggle
   function setupBookingTypeToggle() {
-    const btns = elements.bookingTypeToggle.querySelectorAll('.radio-btn');
-    btns.forEach((btn) => {
-      btn.addEventListener('click', () => {
-        btns.forEach((b) => b.classList.remove('active'));
-        btn.classList.add('active');
-        state.bookingType = btn.getAttribute('data-value');
+    if (elements.bookingTypeToggle) {
+      const btns = elements.bookingTypeToggle.querySelectorAll('.radio-btn');
+      btns.forEach((btn) => {
+        btn.addEventListener('click', () => {
+          btns.forEach((b) => b.classList.remove('active'));
+          btn.classList.add('active');
+          state.bookingType = btn.getAttribute('data-value');
+        });
       });
-    });
+    }
 
-    elements.ocrToggle.addEventListener('change', (e) => {
-      state.enableOcr = e.target.checked;
-    });
+    if (elements.ocrToggle) {
+      elements.ocrToggle.addEventListener('change', (e) => {
+        state.enableOcr = e.target.checked;
+      });
+    }
 
-    elements.loadingPointSelect.addEventListener('change', (e) => {
-      state.loadingPoint = e.target.value;
-    });
+    if (elements.loadingPointSelect) {
+      elements.loadingPointSelect.addEventListener('change', (e) => {
+        state.loadingPoint = e.target.value;
+      });
+    }
   }
 
   // File Upload & Dropzone
@@ -303,9 +311,12 @@
     const formData = new FormData();
     formData.append('file', state.selectedFile);
 
-    const url = `/api/v1/bookings/reconcile?loading_point=${encodeURIComponent(
+    let url = `/api/v1/bookings/reconcile?loading_point=${encodeURIComponent(
       state.loadingPoint
-    )}&booking_type=${encodeURIComponent(state.bookingType)}&enable_ocr=${state.enableOcr}`;
+    )}&enable_ocr=${state.enableOcr}`;
+    if (state.bookingType && state.bookingType !== 'auto') {
+      url += `&booking_type=${encodeURIComponent(state.bookingType)}`;
+    }
 
     try {
       const response = await fetch(url, {
@@ -370,7 +381,73 @@
   function populateReviewScreen(data) {
     // 1. Top Summary Bar
     elements.barDocName.textContent = data.original_filename || state.selectedFile.name;
-    const dossier = data.truck_dossiers[0];
+    elements.barPageConservation.textContent = `${data.total_pages_accounted_for}/${data.total_pages_in} Conserved`;
+
+    // 2. Multi-Truck Selector Bar
+    state.activeTruckIndex = 0;
+    renderTruckSelector(data);
+
+    // 3. Build Thumbnails
+    buildThumbnailBar(data);
+
+    // 4. Select active truck dossier
+    selectTruck(0);
+
+    // 5. Render Discrepancies
+    renderDiscrepancies(data);
+
+    // 6. Render Page Accounting
+    renderAccounting(data);
+  }
+
+  function renderTruckSelector(data) {
+    if (!elements.truckSelectorBar) return;
+    const dossiers = data.truck_dossiers || [];
+
+    if (dossiers.length > 1) {
+      elements.truckSelectorBar.style.display = 'flex';
+      elements.truckSelectorBar.innerHTML = '';
+
+      dossiers.forEach((d, idx) => {
+        const pill = document.createElement('div');
+        pill.className = `truck-tab-pill ${idx === state.activeTruckIndex ? 'active' : ''}`;
+        const lrsCount = d.reconciled_consignments ? d.reconciled_consignments.length : 0;
+        const bType = d.booking_type ? d.booking_type.toUpperCase() : 'TRIP';
+        pill.innerHTML = `
+          <span>🚚 ${d.truck_number}</span>
+          <span class="truck-tab-badge">${bType} • ${lrsCount} LR${lrsCount === 1 ? '' : 's'}</span>
+        `;
+        pill.addEventListener('click', () => {
+          // Persist working edits on active truck before switching
+          const prevD = dossiers[state.activeTruckIndex];
+          if (prevD) {
+            prevD.reconciled_consignments = state.workingConsignments;
+          }
+          state.activeTruckIndex = idx;
+          selectTruck(idx);
+        });
+        elements.truckSelectorBar.appendChild(pill);
+      });
+    } else {
+      elements.truckSelectorBar.style.display = 'none';
+      elements.truckSelectorBar.innerHTML = '';
+    }
+  }
+
+  function selectTruck(index) {
+    const data = state.reconciliationData;
+    if (!data) return;
+    const dossiers = data.truck_dossiers || [];
+    const dossier = dossiers[index];
+
+    // Update active tab pill in selector bar
+    if (elements.truckSelectorBar) {
+      const pills = elements.truckSelectorBar.querySelectorAll('.truck-tab-pill');
+      pills.forEach((p, idx) => {
+        p.classList.toggle('active', idx === index);
+      });
+    }
+
     if (dossier) {
       elements.barTruckPlate.textContent = dossier.truck_number;
       elements.barStatusBadge.textContent = dossier.dossier_status;
@@ -383,22 +460,19 @@
       elements.barStatusBadge.className = 'badge-status badge-status-review';
     }
 
-    elements.barPageConservation.textContent = `${data.total_pages_accounted_for}/${data.total_pages_in} Conserved`;
-
-    // 2. Build Thumbnails
-    buildThumbnailBar(data);
-
-    // 3. Render Aggregated Metrics
+    // Render Aggregated Metrics for selected truck
     updateAggregatedMetrics(dossier);
 
-    // 4. Render Consignments Cards
+    // Render Consignments Cards for selected truck
     renderConsignments(dossier ? dossier.reconciled_consignments : []);
 
-    // 5. Render Discrepancies
-    renderDiscrepancies(data);
-
-    // 6. Render Page Accounting
-    renderAccounting(data);
+    // Jump to the first page associated with this truck
+    if (dossier && dossier.reconciled_consignments && dossier.reconciled_consignments.length > 0) {
+      const firstPage = dossier.reconciled_consignments[0].source_page;
+      if (firstPage && firstPage >= 1 && firstPage <= state.totalPages) {
+        goToPage(firstPage);
+      }
+    }
   }
 
   function buildThumbnailBar(data) {
@@ -686,8 +760,9 @@
   }
 
   function recalculateTotals() {
-    if (!state.reconciliationData || !state.reconciliationData.truck_dossiers[0]) return;
-    const dossier = state.reconciliationData.truck_dossiers[0];
+    if (!state.reconciliationData || !state.reconciliationData.truck_dossiers) return;
+    const dossier = state.reconciliationData.truck_dossiers[state.activeTruckIndex || 0];
+    if (!dossier) return;
 
     // Synchronize working consignments back into state
     dossier.reconciled_consignments = state.workingConsignments;
@@ -870,9 +945,10 @@
   async function exportReconciledExcel() {
     if (!state.reconciliationData) return;
 
-    // Apply any edits to working data
-    if (state.reconciliationData.truck_dossiers[0]) {
-      state.reconciliationData.truck_dossiers[0].reconciled_consignments = state.workingConsignments;
+    // Apply any edits on active truck to working data
+    const activeDossier = state.reconciliationData.truck_dossiers[state.activeTruckIndex || 0];
+    if (activeDossier) {
+      activeDossier.reconciled_consignments = state.workingConsignments;
     }
 
     if (elements.footerExportBtn) {

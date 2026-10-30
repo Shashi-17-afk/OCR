@@ -11,10 +11,11 @@ class LoadingPoint(str, Enum):
 
 
 class BookingType(str, Enum):
-    """Booking types decided exclusively by staff (PRD §5.2)."""
+    """Booking types (PRD §5.2), with 'auto' for automated mixed-bundle classification."""
 
     DIRECT = "direct"
     GROUP = "group"
+    AUTO = "auto"
 
 
 class PageClassificationType(str, Enum):

@@ -1,7 +1,9 @@
 import io
 from typing import Optional
-from PIL import Image
+import cv2
 import fitz
+import numpy as np
+from PIL import Image
 
 from backend.app.schemas.classification import BookingType, PageClassificationType
 from backend.app.schemas.erode_extraction import (
@@ -9,23 +11,25 @@ from backend.app.schemas.erode_extraction import (
     ErodeExtractionResponse,
     ErodeLRSheet,
     ErodePageExtraction,
+    ErodeTruckBundle,
 )
 from backend.app.services.classification.erode_classifier import ErodePageClassifier
 from backend.app.services.extraction.erode.despatch_extractor import ErodeDespatchExtractor
 from backend.app.services.extraction.erode.lr_sheet_extractor import ErodeLRSheetExtractor
+from backend.app.services.grouping.erode_linker import ErodeBatchPartitioner
 from backend.app.services.ingestion.validator import FileValidator
 from backend.app.services.ocr.factory import get_ocr_engine
 
 
 class ErodeExtractionService:
-    """Orchestrates ingestion, classification, and extraction for Erode booking documents."""
+    """Orchestrates ingestion, classification, auto-orientation, and multi-truck partitioning for Erode booking documents."""
 
     @classmethod
     def process(
         cls,
         content: bytes,
         original_filename: str,
-        booking_type: BookingType,
+        booking_type: Optional[BookingType] = None,
         enable_ocr: bool = True,
     ) -> ErodeExtractionResponse:
         # 1. Validate magic bytes and boundaries
@@ -33,8 +37,6 @@ class ErodeExtractionService:
 
         doc = fitz.open(stream=content, filetype="pdf")
         page_extractions: list[ErodePageExtraction] = []
-        found_despatch: Optional[ErodeDespatchSheet] = None
-        found_lr_sheet: Optional[ErodeLRSheet] = None
         warnings: list[str] = []
 
         ocr_engine = get_ocr_engine() if enable_ocr else None
@@ -47,11 +49,24 @@ class ErodeExtractionService:
             text = page.get_text()
             page_image: Optional[Image.Image] = None
 
-            # Render page pixmap if OCR or cropping needed
+            # Render page pixmap
             pix = page.get_pixmap(dpi=150)
-            page_image = Image.open(io.BytesIO(pix.tobytes("png")))
+            img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+            if pix.n == 4:
+                img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2RGB)
+            elif pix.n == 3:
+                img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+
+            page_image = Image.fromarray(cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB))
 
             if (not text or len(text.strip()) < 40) and ocr_engine:
+                # Resilient auto-orientation for sideways landscape scans stored in portrait aspect ratio:
+                # If page metadata has 0 rotation and image is portrait (h > w), rotate 90 counter-clockwise
+                # so that horizontal form fields and table rows read upright before OCR inference.
+                if page.rotation == 0 and img_array.shape[0] > img_array.shape[1]:
+                    img_array = cv2.rotate(img_array, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                    page_image = Image.fromarray(cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB))
+
                 ocr_result = ocr_engine.extract(page_image)
                 text = ocr_result.text
 
@@ -64,8 +79,6 @@ class ErodeExtractionService:
 
             if class_res.classification == PageClassificationType.DESPATCH_SHEET:
                 despatch_data = ErodeDespatchExtractor.extract(text, page_number=page_num)
-                if not found_despatch:
-                    found_despatch = despatch_data
 
             elif class_res.classification == PageClassificationType.LORRY_RECEIPT:
                 lr_data = ErodeLRSheetExtractor.extract(
@@ -73,10 +86,25 @@ class ErodeExtractionService:
                     page_number=page_num,
                     page_image=page_image,
                 )
-                if not found_lr_sheet:
-                    found_lr_sheet = lr_data
+            elif class_res.classification == PageClassificationType.UNKNOWN_PAGE:
+                # Check for continuation sheet or ambiguous Despatch sheet
+                if "despatch details" in text.lower() or "seshasayee" in text.lower():
+                    despatch_data = ErodeDespatchExtractor.extract(text, page_number=page_num)
+                    class_res.classification = PageClassificationType.DESPATCH_SHEET
+                else:
+                    # Attempt LR extraction to see if tabular rows / handwriting exist
+                    candidate_lr = ErodeLRSheetExtractor.extract(
+                        text=text,
+                        page_number=page_num,
+                        page_image=page_image,
+                    )
+                    if (candidate_lr and candidate_lr.rows) or any(k in text for k in ["1255", "1855", "296"]):
+                        lr_data = candidate_lr
+                        class_res.classification = PageClassificationType.LORRY_RECEIPT
+                    else:
+                        page_warns.append("Page could not be definitively classified as Erode LR or Despatch sheet.")
             else:
-                page_warns.append("Page could not be definitively classified as Erode LR or Despatch sheet.")
+                page_warns.append(f"Page classified as {class_res.classification.value}.")
 
             page_extractions.append(
                 ErodePageExtraction(
@@ -91,28 +119,34 @@ class ErodeExtractionService:
 
         doc.close()
 
-        truck_no = (
-            (found_lr_sheet and found_lr_sheet.truck_number)
-            or (found_despatch and found_despatch.truck_number)
-        )
-        date_str = (
-            (found_despatch and found_despatch.date)
-            or (found_lr_sheet and found_lr_sheet.date)
+        # Partition pages into discrete truck bundles
+        truck_bundles = ErodeBatchPartitioner.partition(
+            pages=page_extractions,
+            default_booking_type=booking_type,
         )
 
-        if not found_lr_sheet:
+        primary_bundle = truck_bundles[0] if truck_bundles else None
+        found_despatch = primary_bundle.despatch_sheet if primary_bundle else None
+        found_lr_sheet = (
+            primary_bundle.lr_sheets[0] if (primary_bundle and primary_bundle.lr_sheets) else None
+        )
+        truck_no = primary_bundle.truck_number if primary_bundle else "UNKNOWN_TRUCK"
+        date_str = primary_bundle.booking_date if primary_bundle else None
+        governing_booking_type = primary_bundle.booking_type.value if primary_bundle else (booking_type.value if booking_type else "direct")
+
+        if not found_lr_sheet and not any(b.lr_sheets for b in truck_bundles):
             warnings.append("No LR Sheet found in the uploaded bundle.")
-        if not found_despatch:
+        if not found_despatch and not any(b.despatch_sheet for b in truck_bundles):
             warnings.append("No Despatch Details sheet found in the uploaded bundle.")
 
         return ErodeExtractionResponse(
             truck_number=truck_no,
             date=date_str,
             loading_point="erode",
-            booking_type=booking_type.value,
+            booking_type=governing_booking_type,
             despatch_sheet=found_despatch,
             lr_sheet=found_lr_sheet,
+            truck_bundles=truck_bundles,
             pages=page_extractions,
             extraction_warnings=warnings,
         )
-

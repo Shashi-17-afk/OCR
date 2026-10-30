@@ -1,7 +1,12 @@
 from typing import Optional
 
 from backend.app.schemas.classification import BookingType, LoadingPoint
-from backend.app.schemas.erode_extraction import ErodeDespatchSheet, ErodeLRSheet
+from backend.app.schemas.erode_extraction import (
+    ErodeDespatchSheet,
+    ErodeLRRow,
+    ErodeLRSheet,
+    ErodeTruckBundle,
+)
 from backend.app.schemas.reconciliation import (
     ConsignmentReconciliation,
     ReconciliationStatus,
@@ -22,7 +27,11 @@ class ErodeReconciler:
         booking_type: BookingType,
     ) -> TruckReconciliationDossier:
         # 1. Link Despatch invoices to LR rows
-        link_res: ErodeLinkResult = ErodeLinker.link(lr_sheet, despatch_sheet)
+        link_res: ErodeLinkResult = ErodeLinker.link(
+            lr_sheet=lr_sheet,
+            despatch_sheet=despatch_sheet,
+            booking_type=booking_type,
+        )
 
         reconciled_consignments: list[ConsignmentReconciliation] = []
         truck_total_weight_kg = 0.0
@@ -56,7 +65,13 @@ class ErodeReconciler:
                 )
 
             # C. Invoices & Range Compression (PRD §5.3)
-            unique_invs = list(dict.fromkeys(lr.invoices))
+            # Combine invoices from LR row and linked despatch rows
+            all_consign_invs = list(lr.invoices)
+            for d in despatch_rows:
+                if d.invoice_no not in all_consign_invs:
+                    all_consign_invs.append(d.invoice_no)
+
+            unique_invs = list(dict.fromkeys(all_consign_invs))
             compressed_invs = InvoiceRangeCompressor.compress(unique_invs)
 
             if item.unmatched_invoices:
@@ -67,7 +82,8 @@ class ErodeReconciler:
             # D. Governing Weight & Cross-check (PRD §2, §5.5)
             # Despatch gross weight wins over LR weight
             if despatch_rows:
-                gov_weight_kg = round(sum(r.handwritten_weight_kg or 0.0 for r in despatch_rows), 2)
+                despatch_sum = sum(r.handwritten_weight_kg or 0.0 for r in despatch_rows)
+                gov_weight_kg = round(despatch_sum if despatch_sum > 0 else (lr.weight_kg or 0.0), 2)
             else:
                 gov_weight_kg = round(lr.weight_kg or 0.0, 2)
 
@@ -86,6 +102,9 @@ class ErodeReconciler:
 
             # E. Packages
             total_packs = lr.package_count or 0
+            if total_packs == 0 and despatch_sheet and despatch_sheet.total_bundles:
+                # Fallback to total bundles from despatch
+                total_packs = despatch_sheet.total_bundles // max(len(link_res.consignments), 1)
             truck_total_packages += total_packs
 
             # F. Freight Calculation (PRD §5.4, §6.1, §6.2)
@@ -140,12 +159,29 @@ class ErodeReconciler:
                     is_split_freight=False,
                     total_value_rs=0.0,
                     eway_bills_cell=eway_bills_cell,
-                    eway_expiry_cell=None,  # Erode does not print e-way expiry
+                    eway_expiry_cell=None,
                     status=status,
                     audit_notes=audit_notes,
                     lr_crop_base64=lr.lr_crop_base64,
                 )
             )
+
+        # Direct booking override: if 1 consignment and despatch total gross weight exists, tie to it
+        if len(reconciled_consignments) == 1 and despatch_sheet and despatch_sheet.total_gross_weight_kg:
+            c = reconciled_consignments[0]
+            if c.governing_weight_kg == 0.0 or abs(c.governing_weight_kg - despatch_sheet.total_gross_weight_kg) > 5.0:
+                c.governing_weight_kg = round(despatch_sheet.total_gross_weight_kg, 2)
+                c.governing_weight_mt = round(c.governing_weight_kg / 1000.0, 3)
+            if c.total_packages == 0 and despatch_sheet.total_bundles:
+                c.total_packages = despatch_sheet.total_bundles
+                c.packages_summary = f"{c.total_packages} bundles"
+            truck_total_weight_kg = c.governing_weight_kg
+            truck_total_packages = c.total_packages
+
+        if despatch_sheet and despatch_sheet.total_gross_weight_kg:
+            truck_total_weight_kg = despatch_sheet.total_gross_weight_kg
+        if despatch_sheet and despatch_sheet.total_bundles:
+            truck_total_packages = despatch_sheet.total_bundles
 
         truck_total_weight_mt = round(truck_total_weight_kg / 1000.0, 3)
         truck_total_freight_rs = round(sum(c.freight_amount for c in reconciled_consignments), 2)
@@ -167,3 +203,49 @@ class ErodeReconciler:
             dossier_status=dossier_status,
         )
 
+    @classmethod
+    def reconcile_bundle(
+        cls,
+        bundle: ErodeTruckBundle,
+    ) -> TruckReconciliationDossier:
+        """Reconciles an Erode truck shipment bundle containing multiple LR and Despatch pages."""
+        merged_rows: list[ErodeLRRow] = []
+        dest: Optional[str] = None
+        owner_name: Optional[str] = None
+        owner_phone: Optional[str] = None
+        driver_name: Optional[str] = None
+        driver_phone: Optional[str] = None
+        driver_license: Optional[str] = None
+
+        for s in bundle.lr_sheets:
+            merged_rows.extend(s.rows)
+            dest = dest or s.destination
+            owner_name = owner_name or s.owner_name
+            owner_phone = owner_phone or s.owner_phone
+            driver_name = driver_name or s.driver_name
+            driver_phone = driver_phone or s.driver_phone
+            driver_license = driver_license or s.driver_license
+
+        combined_lr_sheet: Optional[ErodeLRSheet] = None
+        if bundle.lr_sheets:
+            first_s = bundle.lr_sheets[0]
+            combined_lr_sheet = ErodeLRSheet(
+                page_number=first_s.page_number,
+                truck_number=bundle.truck_number,
+                date=bundle.booking_date,
+                destination=dest,
+                owner_name=owner_name,
+                owner_phone=owner_phone,
+                driver_name=driver_name,
+                driver_phone=driver_phone,
+                driver_license=driver_license,
+                rows=merged_rows,
+                total_packages=sum(r.package_count or 0 for r in merged_rows) if merged_rows else None,
+                total_weight_kg=sum(r.weight_kg or 0.0 for r in merged_rows) if merged_rows else None,
+            )
+
+        return cls.reconcile(
+            lr_sheet=combined_lr_sheet,
+            despatch_sheet=bundle.despatch_sheet,
+            booking_type=bundle.booking_type,
+        )

@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Optional
 import numpy as np
 
 from backend.app.core.logging import logger
@@ -92,7 +92,36 @@ class RapidPaddleOCREngine(BaseOCREngine):
                 logger.debug("Skipping unparseable OCR token: %s", str(parse_err))
                 continue
 
-        full_text = "\n".join(text_lines)
+        # 5. Cluster items into spatial reading lines (top-to-bottom, left-to-right)
+        token_boxes: list[tuple[float, float, str]] = []
+        for item in lines:
+            if item.box and len(item.box) >= 4:
+                y_mid = (item.box[0][1] + item.box[2][1]) / 2.0
+                x_mid = (item.box[0][0] + item.box[2][0]) / 2.0
+                token_boxes.append((y_mid, x_mid, item.text))
+            else:
+                token_boxes.append((0.0, 0.0, item.text))
+
+        token_boxes.sort(key=lambda t: t[0])
+        clustered_text_lines: list[str] = []
+        curr_cluster: list[tuple[float, str]] = []
+        curr_cluster_y: Optional[float] = None
+
+        for y, x, txt in token_boxes:
+            if curr_cluster_y is None or abs(y - curr_cluster_y) <= 14.0:
+                curr_cluster.append((x, txt))
+                curr_cluster_y = y if curr_cluster_y is None else (curr_cluster_y + y) / 2.0
+            else:
+                curr_cluster.sort(key=lambda t: t[0])
+                clustered_text_lines.append("   ".join(t[1] for t in curr_cluster))
+                curr_cluster = [(x, txt)]
+                curr_cluster_y = y
+
+        if curr_cluster:
+            curr_cluster.sort(key=lambda t: t[0])
+            clustered_text_lines.append("   ".join(t[1] for t in curr_cluster))
+
+        full_text = "\n".join(clustered_text_lines) if clustered_text_lines else "\n".join(text_lines)
         char_count = len(full_text)
         word_count = len(full_text.split())
         mean_conf = (

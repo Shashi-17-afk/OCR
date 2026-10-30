@@ -31,7 +31,10 @@ class ErodeLRSheetExtractor:
     DL_NO_REGEX = re.compile(r"dl\s*no[\s:]*([a-z0-9\s/-]+?)(?=\s+\d|\n|$)", re.IGNORECASE)
 
     # LR Line item matching
-    LR_START_REGEX = re.compile(r"^\s*(?P<lr>2\d{4})\b\s*(?P<rest>.*)$", re.IGNORECASE)
+    LR_START_REGEX = re.compile(
+        r"(?:^|[^\d])(?P<lr>(?:2|3|0|8|9|4|7)[/\s]?[98]\s*[\dOo]\s*[\dOo]\s*[\dOo\)])(?:\b|(?<=\)))",
+        re.IGNORECASE,
+    )
     INVOICE_PATTERN = re.compile(r"\b(?:i\.\s*|inv[:\s]*)?(12\d{8}(?:[/-]\d{2,4})?)\b", re.IGNORECASE)
     PACKAGES_PATTERN = re.compile(r"\(?(\d+)\)?\s*(reels?|bundles?|bales?|boxes?|notebooks?)", re.IGNORECASE)
     WEIGHT_PATTERN = re.compile(r"\b(\d{4,6}(?:\.\d+)?)\b")
@@ -128,16 +131,25 @@ class ErodeLRSheetExtractor:
         current_lr: Optional[str] = None
 
         for line in lines:
-            m = cls.LR_START_REGEX.match(line)
-            if m:
-                # If we were already tracking an LR block, parse it
-                if current_lr and current_block:
-                    parsed_row = cls._parse_lr_block(current_lr, current_block, page_image, line_boxes)
-                    if parsed_row:
-                        rows.append(parsed_row)
-                current_lr = m.group("lr")
-                current_block = [m.group("rest")]
-            elif current_lr:
+            m = cls.LR_START_REGEX.search(line)
+            if m and not re.search(r"\b(?:phone|dl|truck|lorry|date|weight\s*in|broker|pallipalayam)\b", line, re.I):
+                raw_lr = m.group("lr")
+                clean_lr = re.sub(r"[\s/]+", "", raw_lr).replace(")", "1").replace("O", "0").replace("o", "0")
+                if len(clean_lr) == 5:
+                    if clean_lr[1] in ("9", "8") and clean_lr[0] != "2":
+                        clean_lr = "2" + clean_lr[1:]
+
+                if len(clean_lr) == 5 and clean_lr.startswith("29"):
+                    if current_lr and current_block:
+                        parsed_row = cls._parse_lr_block(current_lr, current_block, page_image, line_boxes)
+                        if parsed_row:
+                            rows.append(parsed_row)
+                    current_lr = clean_lr
+                    rest = line[:m.start()] + " " + line[m.end():]
+                    current_block = [rest.strip()] if rest.strip() else []
+                    continue
+
+            if current_lr:
                 # Stop if we hit footer totals line
                 if re.match(r"^[-–—_]{5,}$", line) or re.search(r"\b(?:total|signature)\b", line, re.IGNORECASE):
                     parsed_row = cls._parse_lr_block(current_lr, current_block, page_image, line_boxes)

@@ -183,3 +183,21 @@ def test_erode_transport_pack_reconcile_and_export():
     assert export_resp.headers["content-type"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
+def test_erode_reconcile_without_booking_type_auto_detect():
+    """Verifies that omitting booking_type automatically auto-classifies the booking per truck."""
+    pdf_bytes = create_synthetic_erode_bundle_pdf(is_direct=False)
+    # Notice: NO booking_type in query parameters!
+    resp = client.post(
+        "/api/v1/bookings/reconcile?loading_point=erode&enable_ocr=false",
+        files={"file": ("erode_bundle.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert resp.status_code == status.HTTP_200_OK
+    data = resp.json()
+
+    assert data["loading_point"] == "erode"
+    assert len(data["truck_dossiers"]) == 1
+    # Auto-detected as group booking because there are multiple LRs and multiple consignees
+    assert data["truck_dossiers"][0]["booking_type"] == "group"
+    assert len(data["truck_dossiers"][0]["reconciled_consignments"]) == 3
+
+

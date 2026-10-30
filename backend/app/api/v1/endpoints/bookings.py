@@ -1,3 +1,5 @@
+from typing import Optional
+
 from fastapi import APIRouter, Body, File, HTTPException, Query, Response, UploadFile, status
 
 from backend.app.core.config import settings
@@ -463,9 +465,13 @@ async def export_tirunelveli_excel_from_reconciliation(
     excel_bytes = TirunelveliExcelExporter.export(reconciliation)
 
     if reconciliation.truck_dossiers:
-        d = reconciliation.truck_dossiers[0]
-        date_clean = d.booking_date.replace("/", ".").replace("-", ".")
-        download_filename = f"{d.truck_number}_{date_clean}_reconciled.xlsx"
+        if len(reconciliation.truck_dossiers) > 1:
+            first_truck = reconciliation.truck_dossiers[0].truck_number
+            download_filename = f"{first_truck}_batch_{len(reconciliation.truck_dossiers)}trucks.xlsx"
+        else:
+            d = reconciliation.truck_dossiers[0]
+            date_clean = (d.booking_date or "reconciled").replace("/", ".").replace("-", ".")
+            download_filename = f"{d.truck_number}_{date_clean}_reconciled.xlsx"
     else:
         download_filename = f"{reconciliation.original_filename}_reconciled.xlsx"
 
@@ -534,9 +540,9 @@ async def extract_erode_document(
 )
 async def reconcile_erode_document(
     file: UploadFile = File(..., description="Erode document bundle (PDF, PNG, JPEG)"),
-    booking_type: BookingType = Query(
-        ...,
-        description="Mandatory booking type decided by staff ('direct' or 'group')",
+    booking_type: Optional[BookingType] = Query(
+        default=None,
+        description="Booking type ('direct' or 'group'). If omitted, automatically determined per shipment.",
     ),
     enable_ocr: bool = Query(
         default=True,
@@ -572,18 +578,36 @@ async def reconcile_erode_document(
                     or extract_res.lr_sheet.driver_name is not None
                 )
             )
+            or (
+                bool(extract_res.truck_bundles)
+                and any(
+                    b.despatch_sheet or (b.lr_sheets and any(s.rows for s in b.lr_sheets))
+                    for b in extract_res.truck_bundles
+                )
+            )
         )
 
         if is_mill_bundle:
-            dossier = ErodeReconciler.reconcile(
-                lr_sheet=extract_res.lr_sheet,
-                despatch_sheet=extract_res.despatch_sheet,
-                booking_type=booking_type,
-            )
+            dossiers = []
+            if extract_res.truck_bundles:
+                for bundle in extract_res.truck_bundles:
+                    b_dossier = ErodeReconciler.reconcile_bundle(bundle)
+                    dossiers.append(b_dossier)
+            else:
+                dossier = ErodeReconciler.reconcile(
+                    lr_sheet=extract_res.lr_sheet,
+                    despatch_sheet=extract_res.despatch_sheet,
+                    booking_type=booking_type,
+                )
+                dossiers.append(dossier)
 
-            all_notes = [note for c in dossier.reconciled_consignments for note in c.audit_notes]
+            all_notes = [note for d in dossiers for c in d.reconciled_consignments for note in c.audit_notes]
             overall_status = ReconciliationStatus.CONFIRMED
-            if any(c.status != ReconciliationStatus.CONFIRMED for c in dossier.reconciled_consignments):
+            if any(
+                c.status != ReconciliationStatus.CONFIRMED
+                for d in dossiers
+                for c in d.reconciled_consignments
+            ):
                 overall_status = ReconciliationStatus.REVIEW_REQUIRED_DISCREPANCY
 
             total_pages = len(extract_res.pages)
@@ -602,12 +626,14 @@ async def reconcile_erode_document(
                     )
                 )
 
+            governing_booking_type = dossiers[0].booking_type if dossiers else booking_type
+
             return TirunelveliReconciliationResponse(
                 document_id=extract_res.document_id,
                 original_filename=filename,
                 loading_point=LoadingPoint.ERODE,
-                booking_type=booking_type,
-                truck_dossiers=[dossier],
+                booking_type=governing_booking_type,
+                truck_dossiers=dossiers,
                 total_pages_in=total_pages,
                 total_pages_accounted_for=total_pages,
                 global_reconciliation_flags=all_notes,
@@ -645,9 +671,9 @@ async def reconcile_erode_document(
 )
 async def export_erode_excel(
     file: UploadFile = File(..., description="Erode document bundle (PDF, PNG, JPEG)"),
-    booking_type: BookingType = Query(
-        ...,
-        description="Mandatory booking type decided by staff ('direct' or 'group')",
+    booking_type: Optional[BookingType] = Query(
+        default=None,
+        description="Booking type ('direct' or 'group'). If omitted, automatically determined per shipment.",
     ),
     enable_ocr: bool = Query(
         default=True,
@@ -663,9 +689,13 @@ async def export_erode_excel(
     excel_bytes = TirunelveliExcelExporter.export(reconciled_resp)
 
     if reconciled_resp.truck_dossiers:
-        d = reconciled_resp.truck_dossiers[0]
-        date_clean = d.booking_date.replace("/", ".").replace("-", ".")
-        download_filename = f"{d.truck_number}_{date_clean}_reconciled.xlsx"
+        if len(reconciled_resp.truck_dossiers) > 1:
+            first_truck = reconciled_resp.truck_dossiers[0].truck_number
+            download_filename = f"{first_truck}_batch_{len(reconciled_resp.truck_dossiers)}trucks.xlsx"
+        else:
+            d = reconciled_resp.truck_dossiers[0]
+            date_clean = (d.booking_date or "reconciled").replace("/", ".").replace("-", ".")
+            download_filename = f"{d.truck_number}_{date_clean}_reconciled.xlsx"
     else:
         download_filename = f"{reconciled_resp.original_filename}_reconciled.xlsx"
 
@@ -694,9 +724,9 @@ async def reconcile_booking(
         ...,
         description="Loading point selection ('tirunelveli' or 'erode')",
     ),
-    booking_type: BookingType = Query(
-        ...,
-        description="Staff-selected booking type ('direct' or 'group')",
+    booking_type: Optional[BookingType] = Query(
+        default=None,
+        description="Booking type ('direct' or 'group'). If omitted, automatically determined per shipment.",
     ),
     enable_ocr: bool = Query(
         default=True,
@@ -707,7 +737,8 @@ async def reconcile_booking(
     if loading_point == LoadingPoint.ERODE:
         return await reconcile_erode_document(file=file, booking_type=booking_type, enable_ocr=enable_ocr)
     else:
-        return await reconcile_tirunelveli_document(file=file, loading_point=loading_point, booking_type=booking_type, enable_ocr=enable_ocr)
+        eff_type = booking_type if (booking_type and booking_type != BookingType.AUTO) else BookingType.DIRECT
+        return await reconcile_tirunelveli_document(file=file, loading_point=loading_point, booking_type=eff_type, enable_ocr=enable_ocr)
 
 
 @router.post(
@@ -722,9 +753,9 @@ async def export_booking_excel(
         ...,
         description="Loading point selection ('tirunelveli' or 'erode')",
     ),
-    booking_type: BookingType = Query(
-        ...,
-        description="Staff-selected booking type ('direct' or 'group')",
+    booking_type: Optional[BookingType] = Query(
+        default=None,
+        description="Booking type ('direct' or 'group'). If omitted, automatically determined per shipment.",
     ),
     enable_ocr: bool = Query(
         default=True,
@@ -735,7 +766,8 @@ async def export_booking_excel(
     if loading_point == LoadingPoint.ERODE:
         return await export_erode_excel(file=file, booking_type=booking_type, enable_ocr=enable_ocr)
     else:
-        return await export_tirunelveli_excel(file=file, loading_point=loading_point, booking_type=booking_type, enable_ocr=enable_ocr)
+        eff_type = booking_type if (booking_type and booking_type != BookingType.AUTO) else BookingType.DIRECT
+        return await export_tirunelveli_excel(file=file, loading_point=loading_point, booking_type=eff_type, enable_ocr=enable_ocr)
 
 
 @router.post(

@@ -99,13 +99,19 @@ class ErodeReconciler:
                 )
 
             truck_total_weight_kg += gov_weight_kg
+            if gov_weight_kg == 0.0:
+                audit_notes.append(
+                    "Individual consignment weight not explicitly recorded in source; governed by truck total gross weight."
+                )
 
             # E. Packages
+            # Individual consignment packages are only assigned when explicitly recorded in source
             total_packs = lr.package_count or 0
-            if total_packs == 0 and despatch_sheet and despatch_sheet.total_bundles:
-                # Fallback to total bundles from despatch
-                total_packs = despatch_sheet.total_bundles // max(len(link_res.consignments), 1)
             truck_total_packages += total_packs
+            if total_packs == 0:
+                audit_notes.append(
+                    "Individual consignment package count not explicitly recorded in source; governed by truck total packages."
+                )
 
             # F. Freight Calculation (PRD §5.4, §6.1, §6.2)
             if despatch_rows:
@@ -130,10 +136,14 @@ class ErodeReconciler:
             if bill_to_differs_from_delivery or not weight_matches or item.unmatched_invoices:
                 status = ReconciliationStatus.REVIEW_REQUIRED_DISCREPANCY
 
+            src_page = lr_sheet.page_number if lr_sheet else (despatch_sheet.page_number if despatch_sheet else 1)
+            inv_pages = [despatch_sheet.page_number] if despatch_sheet else []
+            ewb_pages = [despatch_sheet.page_number] if (despatch_sheet and ewbs) else []
+
             reconciled_consignments.append(
                 ConsignmentReconciliation(
                     consignment_id=f"ERODE_{link_res.truck_number}_{lr_norm}",
-                    source_page=lr_sheet.page_number if lr_sheet else 1,
+                    source_page=src_page,
                     lr_number_raw=lr_raw,
                     lr_number_normalized=lr_norm,
                     truck_number=link_res.truck_number,
@@ -148,7 +158,9 @@ class ErodeReconciler:
                     unique_invoices=unique_invs,
                     physical_invoice_pages_count=len(despatch_rows),
                     duplicate_invoice_pages_detected=False,
-                    packages_summary=lr.packages_str,
+                    invoice_pages=inv_pages,
+                    eway_bill_pages=ewb_pages,
+                    packages_summary=lr.packages_str if (lr.packages_str and lr.packages_str != "Unknown") else "Unspecified",
                     total_packages=total_packs,
                     governing_weight_kg=gov_weight_kg,
                     governing_weight_mt=gov_weight_mt,
@@ -174,7 +186,8 @@ class ErodeReconciler:
                 c.governing_weight_mt = round(c.governing_weight_kg / 1000.0, 3)
             if c.total_packages == 0 and despatch_sheet.total_bundles:
                 c.total_packages = despatch_sheet.total_bundles
-                c.packages_summary = f"{c.total_packages} bundles"
+                unit_str = getattr(despatch_sheet, "package_unit", "bundles")
+                c.packages_summary = f"{c.total_packages} {unit_str}"
             truck_total_weight_kg = c.governing_weight_kg
             truck_total_packages = c.total_packages
 
@@ -190,6 +203,12 @@ class ErodeReconciler:
         if any(c.status != ReconciliationStatus.CONFIRMED for c in reconciled_consignments):
             dossier_status = ReconciliationStatus.REVIEW_REQUIRED_DISCREPANCY
 
+        d_name = lr_sheet.driver_name if lr_sheet else None
+        d_phone = lr_sheet.driver_phone if lr_sheet else None
+        d_license = lr_sheet.driver_license if lr_sheet else None
+        o_name = lr_sheet.owner_name if lr_sheet else None
+        o_phone = lr_sheet.owner_phone if lr_sheet else None
+
         return TruckReconciliationDossier(
             truck_number=link_res.truck_number,
             booking_date=link_res.booking_date,
@@ -201,6 +220,11 @@ class ErodeReconciler:
             truck_total_value_rs=truck_total_value_rs,
             truck_total_freight_rs=truck_total_freight_rs,
             dossier_status=dossier_status,
+            driver_name=d_name,
+            driver_phone=d_phone,
+            driver_license=d_license,
+            owner_name=o_name,
+            owner_phone=o_phone,
         )
 
     @classmethod

@@ -95,15 +95,18 @@ class ErodeLinker:
             )
             cust_name = despatch_sheet.rows[0].customer_name
             dest_name = despatch_sheet.rows[0].destination
+            unit_str = getattr(despatch_sheet, "package_unit", "bundles")
+            packages_str = f"{despatch_sheet.total_bundles} {unit_str}" if despatch_sheet.total_bundles else "Unspecified"
+            package_count = despatch_sheet.total_bundles
             single_lr_row = ErodeLRRow(
                 lr_number=main_lr,
                 party_name=cust_name,
                 delivery_to=dest_name,
                 raw_invoice_text=", ".join(r.invoice_no for r in despatch_sheet.rows),
                 invoices=[r.invoice_no for r in despatch_sheet.rows],
-                packages_str=f"{despatch_sheet.total_bundles or len(despatch_sheet.rows)} pkgs",
-                package_count=despatch_sheet.total_bundles or len(despatch_sheet.rows),
-                package_type="bundles",
+                packages_str=packages_str,
+                package_count=package_count,
+                package_type=unit_str,
                 weight_kg=despatch_sheet.total_gross_weight_kg,
             )
             consignments.append(
@@ -181,15 +184,16 @@ class ErodeLinker:
                     lr_no = str(base_num + len(used_lrs))
                 used_lrs.add(lr_no)
 
+                unit_str = getattr(despatch_sheet, "package_unit", "bundles") if despatch_sheet else "bundles"
                 gen_lr = ErodeLRRow(
                     lr_number=lr_no,
                     party_name=d_rows[0].customer_name,
                     delivery_to=d_rows[0].destination,
                     raw_invoice_text=", ".join(r.invoice_no for r in d_rows),
                     invoices=[r.invoice_no for r in d_rows],
-                    packages_str=f"{len(d_rows)} pkgs",
-                    package_count=len(d_rows),
-                    package_type="bundles",
+                    packages_str="Unspecified",
+                    package_count=None,
+                    package_type=unit_str,
                     weight_kg=sum(r.handwritten_weight_kg for r in d_rows if r.handwritten_weight_kg) or None,
                 )
                 consignments.append(
@@ -224,6 +228,13 @@ class ErodeBatchPartitioner:
         current_lr_sheets: list[ErodeLRSheet] = []
         current_page_nums: list[int] = []
 
+        # Collect authoritative batch date across confirmed despatch sheets in this ingested document
+        batch_booking_date: Optional[str] = None
+        for p in pages:
+            if p.despatch and p.despatch.date:
+                batch_booking_date = p.despatch.date
+                break
+
         for p in pages:
             if p.classification == PageClassificationType.DESPATCH_SHEET:
                 # Despatch Sheet marks the end boundary of a truck shipment
@@ -245,10 +256,12 @@ class ErodeBatchPartitioner:
                 # Normalize plate (e.g. TN21U1899 / TN81U1899)
                 truck_no = re.sub(r"\s+", "", truck_no).upper()
 
-                # Determine booking date
+                # Determine booking date (authoritative despatch header > LR sheet header > batch header inheritance)
+                lr_date = next((s.date for s in current_lr_sheets if s.date), None)
                 booking_date = (
                     (despatch and despatch.date)
-                    or (current_lr_sheets and current_lr_sheets[0].date)
+                    or lr_date
+                    or batch_booking_date
                 )
 
                 # Auto-classify booking type based on unique LR numbers and customer destinations
@@ -289,7 +302,8 @@ class ErodeBatchPartitioner:
         if current_lr_sheets:
             all_lr_rows = [row for s in current_lr_sheets for row in s.rows]
             truck_no = current_lr_sheets[0].truck_number or "UNKNOWN_TRUCK"
-            b_date = current_lr_sheets[0].date
+            lr_date = next((s.date for s in current_lr_sheets if s.date), None)
+            b_date = lr_date or batch_booking_date
             unique_lrs = set(r.lr_number for r in all_lr_rows if r.lr_number)
             b_type = BookingType.GROUP if len(unique_lrs) > 1 else (default_booking_type or BookingType.DIRECT)
 
@@ -304,4 +318,50 @@ class ErodeBatchPartitioner:
                 )
             )
 
-        return bundles
+        # Consolidate bundles sharing the same vehicle license plate into single truck shipments
+        consolidated_bundles: list[ErodeTruckBundle] = []
+        for b in bundles:
+            plate_clean = re.sub(r"\s+", "", b.truck_number or "").upper()
+            existing = next(
+                (
+                    eb
+                    for eb in consolidated_bundles
+                    if re.sub(r"\s+", "", eb.truck_number or "").upper() == plate_clean
+                    and plate_clean not in ("UNKNOWN_TRUCK", "")
+                ),
+                None,
+            )
+            if existing:
+                # Merge into existing bundle
+                existing.lr_sheets.extend(b.lr_sheets)
+                existing.page_numbers.extend(b.page_numbers)
+                if not existing.despatch_sheet and b.despatch_sheet:
+                    existing.despatch_sheet = b.despatch_sheet
+                elif existing.despatch_sheet and b.despatch_sheet:
+                    # Multi-page despatch sheet (e.g. Part 1 + Part 2)
+                    if b.despatch_sheet.rows:
+                        if existing.despatch_sheet.rows is None:
+                            existing.despatch_sheet.rows = []
+                        existing.despatch_sheet.rows.extend(b.despatch_sheet.rows)
+                    if b.despatch_sheet.total_gross_weight_kg:
+                        existing.despatch_sheet.total_gross_weight_kg = round(
+                            (existing.despatch_sheet.total_gross_weight_kg or 0.0)
+                            + (b.despatch_sheet.total_gross_weight_kg or 0.0),
+                            3,
+                        )
+                    if b.despatch_sheet.total_bundles:
+                        existing.despatch_sheet.total_bundles = (
+                            (existing.despatch_sheet.total_bundles or 0)
+                            + (b.despatch_sheet.total_bundles or 0)
+                        )
+                if (not existing.booking_date or existing.booking_date == "UNKNOWN_DATE") and (b.booking_date and b.booking_date != "UNKNOWN_DATE"):
+                    existing.booking_date = b.booking_date
+            else:
+                consolidated_bundles.append(b)
+
+        # Ensure batch booking date inheritance for any truck missing date
+        for b in consolidated_bundles:
+            if (not b.booking_date or b.booking_date == "UNKNOWN_DATE") and batch_booking_date:
+                b.booking_date = batch_booking_date
+
+        return consolidated_bundles

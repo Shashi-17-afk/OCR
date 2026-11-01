@@ -68,21 +68,27 @@ class ImagePreprocessor:
             # Threshold to isolate text blocks
             _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-            coords = np.column_stack(np.where(thresh > 0))
-            if len(coords) < 100:  # Not enough text pixels to compute reliable skew
+            # Morphological horizontal dilation to merge letters into line segments
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 2))
+            dilated = cv2.dilate(thresh, kernel, iterations=2)
+            contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            angles = []
+            for cnt in contours:
+                if cv2.contourArea(cnt) > 200:
+                    (cx, cy), (w, h), ang = cv2.minAreaRect(cnt)
+                    if w < h:
+                        w, h = h, w
+                        ang = ang + 90 if ang < 0 else ang - 90
+                    # Only accept horizontal text lines with strong aspect ratio
+                    if w >= 2.5 * h:
+                        if -15.0 <= ang <= 15.0:
+                            angles.append(ang)
+
+            if len(angles) < 5:
                 return img, 0.0
 
-            # Calculate minAreaRect on foreground pixels
-            rect = cv2.minAreaRect(coords)
-            angle = rect[-1]
-
-            # Adjust OpenCV angle convention
-            if angle < -45:
-                angle = -(90 + angle)
-            elif angle > 45:
-                angle = 90 - angle
-            else:
-                angle = -angle
+            angle = float(np.median(angles))
 
             # Ignore negligible skew
             if abs(angle) < 0.5:

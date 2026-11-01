@@ -1,3 +1,4 @@
+import datetime
 import re
 from typing import Optional
 from PIL import Image
@@ -15,19 +16,33 @@ class ErodeLRSheetExtractor:
         re.IGNORECASE,
     )
     PLATE_REGEX = re.compile(r"\b([A-Za-z]{2}\s*\d{1,2}\s*[A-Za-z]{1,3}\s*\d{4})\b", re.IGNORECASE)
-    DATE_REGEX = re.compile(
-        r"\bdate[\s:]*(\d{1,2}[./-]\d{1,2}[./-]\d{2,4})",
-        re.IGNORECASE,
-    )
+    HEADER_DATE_PATTERNS = [
+        re.compile(
+            r"(?i)\b(?:date|dat|datt|dte|dt|pate)[\s.:-]*(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\b"
+        ),
+        re.compile(
+            r"(?i)(?:dat[et]*|dte|dt|pate)[\s.:-]*(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\b"
+        ),
+        re.compile(r"\b(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\b"),
+    ]
     DEST_REGEX = re.compile(
         r"\bdestination[\s:]*([A-Za-z]+(?:\s+[A-Za-z]+)*?)(?=\s+date|\s*$|\n)",
         re.IGNORECASE,
     )
 
+    DEST_CITIES = [
+        "NAVIMUMBAI", "NAVI MUMBAI", "GHAZIABAD", "KOLKATA", "MADURAI", "COIMBATORE",
+        "SALEM", "CHENNAI", "BANGALORE", "HYDERABAD", "MUMBAI",
+        "DELHI", "PONDICHERRY", "TRICHY", "TIRUPPUR", "SIVAKASI", "PUNE",
+        "HUBLI", "KOVILPATTI", "POLLACHI", "CHENGALPATTU", "KARUR", "DINDIGUL",
+        "SURAT", "AHMEDABAD", "CUTTACK", "BHUBANESWAR", "NAGPUR", "INDORE", "JAIPUR", "KANPUR", "LUCKNOW",
+        "MORBI", "VAPI", "SECUNDERABAD", "VIJAYAWADA", "VISAKHAPATNAM", "KOCHI", "CALICUT", "THRISSUR", "KANNUR"
+    ]
+
     OWNER_NAME_REGEX = re.compile(r"owner\s*name[\s:]*([A-Za-z\s.]+?)(?=\s+owner|\s+driver|\n|$)", re.IGNORECASE)
-    OWNER_PHONE_REGEX = re.compile(r"owner\s*phone\s*(?:no)?[\s:]*(\d{10})", re.IGNORECASE)
+    OWNER_PHONE_REGEX = re.compile(r"owner\s*phone\s*(?:no)?[\s.:]*(\d{5}\s*\d{5}|\d{10})", re.IGNORECASE)
     DRIVER_NAME_REGEX = re.compile(r"driver\s*name[\s:]*([A-Za-z\s.]+?)(?=\s+driver|\s+dl|\n|$)", re.IGNORECASE)
-    DRIVER_PHONE_REGEX = re.compile(r"driver\s*phone\s*(?:no)?[\s:]*(\d{10})", re.IGNORECASE)
+    DRIVER_PHONE_REGEX = re.compile(r"driver\s*phone\s*(?:no)?[\s.:]*(\d{5}\s*\d{5}|\d{10})", re.IGNORECASE)
     DL_NO_REGEX = re.compile(r"dl\s*no[\s:]*([a-z0-9\s/-]+?)(?=\s+\d|\n|$)", re.IGNORECASE)
 
     # LR Line item matching
@@ -58,6 +73,26 @@ class ErodeLRSheetExtractor:
         driver_name = cls._match_first(cls.DRIVER_NAME_REGEX, text)
         driver_phone = cls._match_first(cls.DRIVER_PHONE_REGEX, text)
         dl_no = cls._match_first(cls.DL_NO_REGEX, text)
+
+        # Sanitize names against printed form labels
+        def _clean_person_name(val: Optional[str]) -> Optional[str]:
+            if not val:
+                return None
+            val_clean = re.sub(r"[:_.\-]+", " ", val).strip()
+            val_upper = val_clean.upper()
+            disallowed = (
+                "WEIGHT IN KGS", "WEIGHT IN", "TRUCK NO", "PALLIPALAYAM", "SALEM",
+                "OWNER", "DRIVER", "DL NO", "PHONE", "DATE", "SIGNATURE",
+                "SESHASAYEE", "SPB", "ERODE", "UNKNOWN", "TOTAL", "AGREEMENT"
+            )
+            if any(val_upper.startswith(d) or val_upper == d for d in disallowed):
+                return None
+            if len(val_clean) < 3 or not re.search(r"[A-Za-z]{2,}", val_clean):
+                return None
+            return val_clean
+
+        owner_name = _clean_person_name(owner_name)
+        driver_name = _clean_person_name(driver_name)
 
         rows = cls._extract_rows(text, page_image, line_boxes)
         total_packs, total_wt = cls._extract_footer_totals(text)
@@ -92,15 +127,25 @@ class ErodeLRSheetExtractor:
 
     @classmethod
     def _extract_date(cls, text: str) -> Optional[str]:
-        match = cls.DATE_REGEX.search(text)
-        if match:
-            raw = match.group(1).replace(".", "/").replace("-", "/")
-            parts = raw.split("/")
-            if len(parts) == 3:
-                d, m, y = parts
-                if len(y) == 2:
-                    y = f"20{y}"
-                return f"{int(d):02d}/{int(m):02d}/{y}"
+        """Extracts and validates booking date from LR sheet header, normalized to ISO YYYY-MM-DD."""
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        header_lines = lines[:10]
+        header_text = "\n".join(header_lines)
+
+        for pattern in cls.HEADER_DATE_PATTERNS:
+            for match in pattern.finditer(header_text):
+                d_str, m_str, y_str = match.group(1), match.group(2), match.group(3)
+                try:
+                    d = int(d_str)
+                    m = int(m_str)
+                    y = int(y_str)
+                    if y < 100:
+                        y += 2000
+                    val_date = datetime.date(y, m, d)
+                    if 2020 <= val_date.year <= 2035:
+                        return val_date.strftime("%Y-%m-%d")
+                except ValueError:
+                    continue
         return None
 
     @classmethod
@@ -109,7 +154,18 @@ class ErodeLRSheetExtractor:
         if m:
             clean = re.sub(r"\s+", " ", m.group(1)).strip()
             clean = re.sub(r"\s*date.*$", "", clean, flags=re.IGNORECASE).strip()
-            return clean if clean else None
+            if clean:
+                return clean
+
+        # Also search for known destination cities in header lines
+        header_text = text[:800]
+        for city in sorted(cls.DEST_CITIES, key=len, reverse=True):
+            if re.search(r"\b" + re.escape(city) + r"\b", header_text, re.IGNORECASE):
+                # Check for dual destination pairs like COIMBATORE / POLLACHI or Chengalpattu / CHENNAI
+                m_dual = re.search(r"\b([A-Za-z]+)\s*/\s*([A-Za-z]+)\b", header_text)
+                if m_dual and (city.upper() in m_dual.group(0).upper()):
+                    return m_dual.group(0).upper()
+                return city
         return None
 
     @classmethod

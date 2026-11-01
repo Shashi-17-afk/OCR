@@ -21,6 +21,13 @@ from backend.app.schemas.reconciliation import (
     TirunelveliReconciliationResponse,
     TruckReconciliationDossier,
 )
+from backend.app.schemas.tms_booking import (
+    TMSManualCompletionRequest,
+    TMSMergePayload,
+    TMSMergeResponse,
+    TMSReadinessReport,
+    TMSReviewResponse,
+)
 from backend.app.services.export.excel import TirunelveliExcelExporter
 from backend.app.services.extraction.erode.service import ErodeExtractionService
 from backend.app.services.extraction.tirunelveli.service import (
@@ -33,6 +40,8 @@ from backend.app.services.reconciliation.erode_reconciler import ErodeReconciler
 from backend.app.services.reconciliation.reconciler import (
     TirunelveliReconciliationEngine,
 )
+from backend.app.services.tms.tms_excel_generator import TMSExcelExporter
+from backend.app.services.tms.tms_mapper import TMSMapperService
 from backend.app.services.ingestion.exceptions import (
     EmptyFileError,
     EncryptedDocumentError,
@@ -626,7 +635,7 @@ async def reconcile_erode_document(
                     )
                 )
 
-            governing_booking_type = dossiers[0].booking_type if dossiers else booking_type
+            governing_booking_type = (dossiers[0].booking_type if dossiers else None) or booking_type or BookingType.DIRECT
 
             return TirunelveliReconciliationResponse(
                 document_id=extract_res.document_id,
@@ -781,6 +790,135 @@ async def export_booking_excel_from_reconciliation(
 ) -> Response:
     """Unified Excel export from reconciliation response JSON."""
     return await export_tirunelveli_excel_from_reconciliation(reconciliation=reconciliation)
+
+
+# ---------------------------------------------------------------------------
+# TMS Booking Three-Phase Workflow Endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/tms/process-and-map",
+    response_model=TMSReviewResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Phase 1: Ingest Documents & Map Extracted Fields to TMS Schema",
+    description=(
+        "Processes logistics documents through multi-page classification, OCR, and reconciliation, "
+        "and maps all reliably extracted values to client's official TMS schema (Direct & Group Booking). "
+        "Tracks field provenance, confidence scores, and identifies missing mandatory fields."
+    ),
+)
+async def tms_process_and_map(
+    file: UploadFile = File(..., description="Document bundle (PDF, PNG, JPEG)"),
+    loading_point: LoadingPoint = Query(
+        ...,
+        description="Loading point selection ('tirunelveli' or 'erode')",
+    ),
+    booking_type: Optional[BookingType] = Query(
+        default=None,
+        description="Booking type ('direct' or 'group'). If omitted, automatically determined per shipment.",
+    ),
+    enable_ocr: bool = Query(
+        default=True,
+        description="Whether to run local OCR for scanned pages",
+    ),
+) -> TMSReviewResponse:
+    """Unified Phase 1 extraction and TMS field mapping endpoint."""
+    reconciliation = await reconcile_booking(
+        file=file,
+        loading_point=loading_point,
+        booking_type=booking_type,
+        enable_ocr=enable_ocr,
+    )
+    return TMSMapperService.map_reconciliation_to_tms(reconciliation)
+
+
+@router.post(
+    "/tms/validate-and-merge",
+    response_model=TMSMergeResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Phase 2: Validate & Merge User Manual Field Completions",
+    description=(
+        "Validates user manual inputs (phone format, date format, mandatory checks) "
+        "and merges them into the TMS review structure with USER_ENTERED status."
+    ),
+)
+async def tms_validate_and_merge(
+    payload: TMSMergePayload = Body(..., description="Review structure and manual inputs"),
+) -> TMSMergeResponse:
+    """Phase 2 validation and merging of user inputs."""
+    updated_review, errors = TMSMapperService.validate_and_merge_manual_inputs(
+        existing_review=payload.review,
+        request=payload.completion,
+    )
+    is_ready = len(errors) == 0 and updated_review.total_missing_mandatory == 0
+    return TMSMergeResponse(
+        updated_review=updated_review,
+        validation_errors=errors,
+        is_ready_for_export=is_ready,
+    )
+
+
+@router.post(
+    "/tms/export-excel",
+    status_code=status.HTTP_200_OK,
+    summary="Phase 3: Export Completed TMS Excel Workbook",
+    description=(
+        "Generates a completed .xlsx workbook matching the exact structure and styling of "
+        "CTLS TMS Booking Fields.xlsx (Direct Booking and Group Booking sheets)."
+    ),
+    responses={
+        200: {
+            "content": {
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": {}
+            },
+            "description": "Formatted TMS Excel workbook (.xlsx)",
+        },
+        422: {"model": ErrorResponse, "description": "Mandatory fields remain unpopulated"},
+    },
+)
+async def tms_export_excel(
+    review: TMSReviewResponse = Body(..., description="Completed TMS review payload"),
+    force: bool = Query(
+        default=False,
+        description="Allow export even if some mandatory fields remain unpopulated",
+    ),
+) -> Response:
+    """Phase 3 export of completed TMS Excel workbook."""
+    if not force and review.total_missing_mandatory > 0:
+        missing_sample = []
+        for t in review.trucks:
+            for m in t.missing_mandatory_fields[:3]:
+                missing_sample.append(f"Truck {t.truck_number}: {m}")
+        sample_str = "; ".join(missing_sample)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Cannot export: {review.total_missing_mandatory} mandatory fields are still unpopulated. Missing: {sample_str}",
+        )
+
+    excel_bytes = TMSExcelExporter.export(review)
+    first_truck = review.trucks[0].truck_number if review.trucks else "batch"
+    filename = f"CTLS_TMS_Booking_{first_truck}_{len(review.trucks)}trucks.xlsx"
+
+    return Response(
+        content=excel_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post(
+    "/tms/readiness-report",
+    response_model=TMSReadinessReport,
+    status_code=status.HTTP_200_OK,
+    summary="Phase 3: Generate Comprehensive Project Readiness Report",
+    description="Evaluates all 10 project metrics and returns readiness status.",
+)
+async def tms_readiness_report(
+    review: TMSReviewResponse = Body(..., description="Current TMS review payload"),
+) -> TMSReadinessReport:
+    """Phase 3 project readiness evaluation."""
+    return TMSMapperService.generate_readiness_report(review)
 
 
 

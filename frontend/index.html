@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>CTLS Logistics Booking OCR & Reconciliation</title>
-  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/style.css?v=2.0.3">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -36,6 +36,24 @@
   <!-- Main Container -->
   <main class="main-content">
 
+    <!-- Three-Phase Wizard Progress Bar -->
+    <div id="wizardStepsBar" class="wizard-steps-bar" style="display: none;">
+      <div id="stepItem1" class="wizard-step-item active">
+        <span class="wizard-step-num">1</span>
+        <span>Extraction Review</span>
+      </div>
+      <span class="wizard-step-arrow">›</span>
+      <div id="stepItem2" class="wizard-step-item">
+        <span class="wizard-step-num">2</span>
+        <span>Complete Missing Fields</span>
+      </div>
+      <span class="wizard-step-arrow">›</span>
+      <div id="stepItem3" class="wizard-step-item">
+        <span class="wizard-step-num">3</span>
+        <span>TMS Excel & Readiness</span>
+      </div>
+    </div>
+
     <!-- View 1: Ingestion & Setup Screen -->
     <section id="ingestSection" class="ingest-screen">
       <div class="ingest-header">
@@ -56,8 +74,8 @@
           <div class="form-group">
             <label class="form-label" for="loadingPointSelect">Loading Point</label>
             <select id="loadingPointSelect" class="form-select">
-              <option value="tirunelveli" selected>Tirunelveli Loading Point</option>
-              <option value="erode">Erode Loading Point</option>
+              <option value="erode" selected>Erode Loading Point (Active)</option>
+              <option value="tirunelveli">Tirunelveli Loading Point</option>
             </select>
           </div>
 
@@ -171,13 +189,11 @@
             </svg>
             Recalculate
           </button>
-          <button type="button" class="btn btn-success" id="exportExcelBtn">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-              <polyline points="7 10 12 15 17 10"></polyline>
-              <line x1="12" y1="15" x2="12" y2="3"></line>
-            </svg>
-            Approve & Export Excel (.xlsx)
+          <button type="button" class="btn btn-secondary" id="quickExportBtn" title="Export currently verified data directly as Excel">
+            Quick Export (.xlsx)
+          </button>
+          <button type="button" class="btn btn-primary" id="proceedToStep2Btn">
+            Complete Missing Fields (Step 2) →
           </button>
         </div>
       </div>
@@ -216,7 +232,10 @@
         <!-- Right Pane: Extracted Fields & Reconciliation -->
         <div class="right-pane">
           <div class="pane-tabs">
-            <button type="button" class="tab-btn active" data-tab="tabConsignments">
+            <button type="button" class="tab-btn active" data-tab="tabTMSMapping">
+              📋 TMS Field Mapping
+            </button>
+            <button type="button" class="tab-btn" data-tab="tabConsignments">
               🚚 Consignments & Totals
             </button>
             <button type="button" class="tab-btn" data-tab="tabSelectedPage">
@@ -230,8 +249,15 @@
             </button>
           </div>
 
+          <!-- Tab 0: TMS Field Mapping & Provenance -->
+          <div class="tab-content" id="tabTMSMapping">
+            <div id="tmsMappingContainer">
+              <!-- Rendered via JS -->
+            </div>
+          </div>
+
           <!-- Tab 1: Consignments & Totals -->
-          <div class="tab-content" id="tabConsignments">
+          <div class="tab-content" id="tabConsignments" style="display: none;">
             <!-- Aggregated Trip Totals -->
             <div class="totals-summary-card">
               <div class="card-title" style="margin-bottom: 0.75rem;">
@@ -302,14 +328,140 @@
           <!-- Sticky Action Bar -->
           <div class="action-footer">
             <span id="footerStatusText" style="font-size: 0.8rem; color: var(--text-secondary);">
-              Review extracted values and verify discrepancies before Excel generation.
+              Review extracted values and verify discrepancies before completing missing fields.
             </span>
-            <button type="button" class="btn btn-success" id="footerExportBtn">
-              Download Reconciled Excel (.xlsx)
-            </button>
+            <div style="display: flex; gap: 0.75rem;">
+              <button type="button" class="btn btn-secondary" id="footerDirectExportBtn">
+                Quick Export (.xlsx)
+              </button>
+              <button type="button" class="btn btn-primary" id="footerProceedStep2Btn">
+                Complete Missing Fields (Step 2) →
+              </button>
+            </div>
           </div>
         </div>
 
+      </div>
+    </section>
+
+    <!-- View 3: Phase 2 Missing Field Completion Screen -->
+    <section id="manualCompleteSection" class="manual-complete-container" style="display: none;">
+      <div class="manual-header-card">
+        <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+          <div>
+            <h2 style="font-size: 1.35rem; font-weight: 700;">Step 2: Complete Missing Mandatory TMS Fields</h2>
+            <p style="color: var(--text-secondary); font-size: 0.85rem; margin-top: 0.25rem;">
+              Only mandatory TMS fields that could not be extracted from the documents are shown below.
+              All auto-extracted values are safely preserved.
+            </p>
+          </div>
+          <button type="button" class="btn btn-secondary" id="backToReviewBtn">
+            ← Back to Extraction Review
+          </button>
+        </div>
+
+        <!-- Quick Defaults Bar -->
+        <div class="quick-defaults-bar" style="margin-top: 1.25rem;">
+          <strong style="color: var(--text-primary); white-space: nowrap;">⚡ Quick Fleet Defaults:</strong>
+          <input type="text" id="batchVendorName" class="manual-field-input" placeholder="Vendor Name (e.g. SRM Logistics)" style="width: 200px; padding: 0.35rem 0.6rem; font-size: 0.8rem;">
+          <input type="text" id="batchBillFrom" class="manual-field-input" placeholder="Bill From Branch (e.g. Erode / Tirunelveli)" style="width: 200px; padding: 0.35rem 0.6rem; font-size: 0.8rem;">
+          <button type="button" class="btn btn-secondary" id="applyDefaultsBtn" style="padding: 0.35rem 0.75rem; font-size: 0.8rem;">
+            Apply to All Trucks
+          </button>
+        </div>
+
+        <!-- Completion Tracker -->
+        <div class="manual-progress-box">
+          <div>
+            <span style="font-size: 0.85rem; color: var(--text-secondary);">Mandatory Completion Progress:</span>
+            <strong id="manualProgressText" style="font-size: 0.95rem; margin-left: 0.5rem; color: var(--text-primary);">0 of 0 Completed</strong>
+          </div>
+          <div id="manualProgressPill" class="badge-status badge-status-discrepancy">Incomplete</div>
+        </div>
+      </div>
+
+      <!-- Truck Tab Selector in Phase 2 -->
+      <div id="manualTruckTabBar" class="truck-selector-bar" style="margin-bottom: 1.5rem;">
+        <!-- Populated via JS -->
+      </div>
+
+      <!-- Dynamic Form Container for Current Truck -->
+      <div id="manualFieldsContainer">
+        <!-- Rendered via JS -->
+      </div>
+
+      <!-- Phase 2 Action Footer -->
+      <div class="glass-card" style="margin-top: 1.5rem; display: flex; justify-content: space-between; align-items: center;">
+        <button type="button" class="btn btn-secondary" id="manualBackBtn">
+          ← Back to Step 1
+        </button>
+        <div id="manualValidationMsg" style="font-size: 0.82rem; color: var(--danger); font-weight: 500;"></div>
+        <button type="button" class="btn btn-success btn-lg" id="validateAndProceedBtn">
+          Validate & Proceed to Step 3: TMS Excel & Readiness →
+        </button>
+      </div>
+    </section>
+
+    <!-- View 4: Phase 3 TMS Excel Export & Project Readiness Screen -->
+    <section id="readinessSection" class="readiness-container" style="display: none;">
+      <!-- Readiness Hero Card -->
+      <div class="readiness-score-hero">
+        <div>
+          <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem;">
+            <span id="readinessBadge" class="status-chip verified" style="font-size: 0.85rem; padding: 0.3rem 0.75rem;">
+              CLIENT_READY
+            </span>
+            <span style="color: var(--text-secondary); font-size: 0.85rem;">Phase 3 Final Verification</span>
+          </div>
+          <h2 style="font-size: 1.6rem; font-weight: 700;">Logistics TMS Extraction & Booking Ready</h2>
+          <p id="readinessSubtitle" style="color: var(--text-secondary); font-size: 0.9rem; max-width: 620px; margin-top: 0.4rem;">
+            All mandatory TMS booking fields are verified. Ready for direct export to CTLS TMS.
+          </p>
+        </div>
+        <div class="readiness-score-circle">
+          <span id="readinessScoreVal" class="readiness-score-val">98.5%</span>
+          <span class="readiness-score-label">Accuracy</span>
+        </div>
+      </div>
+
+      <!-- 10-Metric Evaluation Grid -->
+      <div class="readiness-grid" id="readinessGridContainer">
+        <!-- Rendered via JS -->
+      </div>
+
+      <!-- Readiness Notes & Accounting Card -->
+      <div class="glass-card" style="margin-bottom: 1.5rem;">
+        <h3 class="card-title" style="margin-bottom: 0.75rem;">
+          Audit Trail & Verification Highlights
+        </h3>
+        <ul id="readinessNotesList" style="padding-left: 1.25rem; font-size: 0.85rem; color: var(--text-secondary); line-height: 1.8;">
+          <!-- Populated via JS -->
+        </ul>
+      </div>
+
+      <!-- Primary Action Buttons -->
+      <div class="glass-card" style="display: flex; justify-content: space-between; align-items: center;">
+        <div style="display: flex; gap: 0.75rem;">
+          <button type="button" class="btn btn-secondary" id="readinessBackToEditBtn">
+            ← Edit Fields (Step 2)
+          </button>
+          <button type="button" class="btn btn-secondary" id="readinessNewUploadBtn">
+            Upload New Bundle
+          </button>
+        </div>
+        <div style="display: flex; gap: 0.75rem;">
+          <button type="button" class="btn btn-secondary" id="downloadAuditJsonBtn">
+            Download JSON Dossier
+          </button>
+          <button type="button" class="btn btn-success btn-lg" id="downloadTMSExcelBtn">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 0.4rem;">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="7 10 12 15 17 10"></polyline>
+              <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+            Download Completed TMS Excel (.xlsx)
+          </button>
+        </div>
       </div>
     </section>
 
@@ -327,6 +479,6 @@
     </div>
   </div>
 
-  <script src="/static/js/app.js"></script>
+  <script src="/static/js/app.js?v=2.0.3"></script>
 </body>
 </html>

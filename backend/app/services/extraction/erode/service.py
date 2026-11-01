@@ -49,7 +49,7 @@ class ErodeExtractionService:
             text = page.get_text()
             page_image: Optional[Image.Image] = None
 
-            # Render page pixmap
+            # Render page pixmap at 150 DPI standard resolution
             pix = page.get_pixmap(dpi=150)
             img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
             if pix.n == 4:
@@ -58,6 +58,7 @@ class ErodeExtractionService:
                 img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
 
             page_image = Image.fromarray(cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB))
+            ocr_result = None
 
             if (not text or len(text.strip()) < 40) and ocr_engine:
                 # Resilient auto-orientation for sideways landscape scans stored in portrait aspect ratio:
@@ -78,7 +79,32 @@ class ErodeExtractionService:
             page_warns: list[str] = []
 
             if class_res.classification == PageClassificationType.DESPATCH_SHEET:
-                despatch_data = ErodeDespatchExtractor.extract(text, page_number=page_num)
+                despatch_data = ErodeDespatchExtractor.extract(
+                    text,
+                    page_number=page_num,
+                    ocr_lines=ocr_result.lines if ocr_result else None,
+                )
+                # Resilient multi-resolution pass: If dot-matrix E-Way bill characters merged (e.g. 11 digits),
+                # re-scan this specific page at 200 DPI for complete 12-digit resolution
+                if ocr_engine and any(r.eway_bill_no and len(r.eway_bill_no) < 12 for r in despatch_data.rows):
+                    pix_high = page.get_pixmap(dpi=200)
+                    img_high = np.frombuffer(pix_high.samples, dtype=np.uint8).reshape(pix_high.height, pix_high.width, pix_high.n)
+                    if pix_high.n == 4:
+                        img_high = cv2.cvtColor(img_high, cv2.COLOR_RGBA2RGB)
+                    elif pix_high.n == 3:
+                        img_high = cv2.cvtColor(img_high, cv2.COLOR_RGB2BGR)
+                    if page.rotation == 0 and img_high.shape[0] > img_high.shape[1]:
+                        img_high = cv2.rotate(img_high, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                    high_res = ocr_engine.extract(Image.fromarray(cv2.cvtColor(img_high, cv2.COLOR_BGR2RGB)))
+                    high_despatch = ErodeDespatchExtractor.extract(
+                        high_res.text,
+                        page_number=page_num,
+                        ocr_lines=high_res.lines,
+                    )
+                    high_ewbs = {r.invoice_no: r.eway_bill_no for r in high_despatch.rows if r.eway_bill_no and len(r.eway_bill_no) == 12}
+                    for r in despatch_data.rows:
+                        if r.invoice_no in high_ewbs:
+                            r.eway_bill_no = high_ewbs[r.invoice_no]
 
             elif class_res.classification == PageClassificationType.LORRY_RECEIPT:
                 lr_data = ErodeLRSheetExtractor.extract(
@@ -89,7 +115,11 @@ class ErodeExtractionService:
             elif class_res.classification == PageClassificationType.UNKNOWN_PAGE:
                 # Check for continuation sheet or ambiguous Despatch sheet
                 if "despatch details" in text.lower() or "seshasayee" in text.lower():
-                    despatch_data = ErodeDespatchExtractor.extract(text, page_number=page_num)
+                    despatch_data = ErodeDespatchExtractor.extract(
+                        text,
+                        page_number=page_num,
+                        ocr_lines=ocr_result.lines if ocr_result else None,
+                    )
                     class_res.classification = PageClassificationType.DESPATCH_SHEET
                 else:
                     # Attempt LR extraction to see if tabular rows / handwriting exist

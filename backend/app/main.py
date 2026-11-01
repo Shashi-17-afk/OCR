@@ -81,6 +81,17 @@ def create_app() -> FastAPI:
         )
 
     # Include API v1 router
+    # Prevent stale browser caching of frontend static assets
+    @app.middleware("http")
+    async def add_no_cache_headers(request: Request, call_next):
+        response = await call_next(request)
+        path = request.url.path
+        if path.startswith("/static/") or path in ("/", "/ui"):
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
+
     app.include_router(api_v1_router, prefix=settings.API_V1_PREFIX)
 
     # Convenience root-level health endpoint matching API v1 health

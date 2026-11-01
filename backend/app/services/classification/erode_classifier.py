@@ -98,6 +98,13 @@ class ErodePageClassifier:
                 scores[PageClassificationType.MATERIAL_INVOICE] += weight
                 detected_anchors[PageClassificationType.MATERIAL_INVOICE].append(pattern)
 
+        # Handwritten LR continuation sheets often lack the top banner but contain multiple LR numbers (369xx, 296xx) and box/bundle rows
+        lr_tokens = len(re.findall(r"\b369\d{2}\b|\b36\d{3}\b|\b29\d{3}\b", cleaned_text))
+        box_tokens = len(re.findall(r"\b\d+\s*(?:box|boxes|bdl|bdls|bundles|reels|sub)\b", cleaned_text))
+        if lr_tokens >= 2 or (lr_tokens >= 1 and box_tokens >= 2):
+            scores[PageClassificationType.LORRY_RECEIPT] += 8.0
+            detected_anchors[PageClassificationType.LORRY_RECEIPT].append("lr_table_rows")
+
         # Boost when explicit title or document type is at top of page
         if re.search(r"^\s*material\s*invoice|document\s*type\s*[:\s]*material\s*invoice", cleaned_text, re.MULTILINE):
             scores[PageClassificationType.MATERIAL_INVOICE] += 5.0

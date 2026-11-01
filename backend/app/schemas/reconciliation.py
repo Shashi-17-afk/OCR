@@ -167,6 +167,13 @@ class TruckReconciliationDossier(BaseModel):
         default_factory=list, description="Dossier-level notices or review flags"
     )
 
+    # Optional driver & transporter details from physical trip sheets
+    driver_name: Optional[str] = Field(default=None, description="Driver name from trip sheet")
+    driver_phone: Optional[str] = Field(default=None, description="Driver phone from trip sheet")
+    driver_license: Optional[str] = Field(default=None, description="Driver DL number from trip sheet")
+    owner_name: Optional[str] = Field(default=None, description="Owner / Transporter name from trip sheet")
+    owner_phone: Optional[str] = Field(default=None, description="Owner phone from trip sheet")
+
 
 class TirunelveliReconciliationResponse(BaseModel):
     """Complete Step 4C response payload."""

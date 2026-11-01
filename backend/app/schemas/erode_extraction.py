@@ -53,6 +53,7 @@ class ErodeDespatchSheet(BaseModel):
     transporter_name: Optional[str] = Field(default=None, description="Transporter Name")
     rows: list[ErodeDespatchRow] = Field(default_factory=list, description="Line items")
     total_bundles: Optional[int] = Field(default=None, description="Total bundles/reels (Bund)")
+    package_unit: str = Field(default="bundles", description="Unit of packaging (bundles or reels)")
     total_net_weight_kg: Optional[float] = Field(default=None, description="Total net weight (NetWt)")
     total_gross_weight_kg: Optional[float] = Field(default=None, description="Total gross weight (GrossWt)")
     no_of_invoices: Optional[int] = Field(default=None, description="No of Inv stated in totals")

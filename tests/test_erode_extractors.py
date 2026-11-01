@@ -20,7 +20,7 @@ def test_extract_erode_despatch_group_booking():
 
     sheet = ErodeDespatchExtractor.extract(text, page_number=1)
     assert sheet.truck_number == "TN52L0517"
-    assert sheet.date == "24/01/2026"
+    assert sheet.date == "2026-01-24"
     assert len(sheet.rows) == 4
 
     # Row 1: 1250510477

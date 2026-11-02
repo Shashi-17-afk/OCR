@@ -1561,8 +1561,8 @@
         body: JSON.stringify(tmsData),
       });
 
-      // If TMS export fails and we have raw reconciliation data, attempt fallback export
-      if (!response.ok && state.reconciliationData) {
+      // If TMS export fails and we have raw reconciliation data (with truck dossiers), attempt fallback export
+      if (!response.ok && state.reconciliationData && Array.isArray(state.reconciliationData.truck_dossiers)) {
         response = await fetch('/api/v1/bookings/export-excel-from-reconciliation', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1580,6 +1580,8 @@
               errDesc = errObj.detail;
             } else if (Array.isArray(errObj.detail)) {
               errDesc = errObj.detail.map((d) => d.msg || JSON.stringify(d)).join('; ');
+            } else if (Array.isArray(errObj.details)) {
+              errDesc = errObj.details.map((d) => (d.field ? `${d.field}: ${d.issue}` : JSON.stringify(d))).join('; ');
             } else if (errObj.message) {
               errDesc = errObj.message;
             }

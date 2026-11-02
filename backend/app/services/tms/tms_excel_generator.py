@@ -66,6 +66,31 @@ class TMSExcelExporter:
         return output_stream.getvalue()
 
     @classmethod
+    def _get_truck_total_freight(cls, truck: TMSTruckDossier) -> Optional[float]:
+        """Calculates total customer freight for truck: sum of consignment freights, or truck total freight."""
+        consignment_freights = []
+        for c in (truck.consignments or []):
+            val = cls._get_field_val(truck, c, "freight_charges", None)
+            if val is not None and isinstance(val, (int, float)) and val > 0:
+                consignment_freights.append(float(val))
+        if consignment_freights:
+            return round(sum(consignment_freights), 2)
+        if truck.total_freight_rs and truck.total_freight_rs > 0:
+            return round(float(truck.total_freight_rs), 2)
+        val = cls._get_field_val(truck, None, "customer_freight_charges", None)
+        if val is not None and isinstance(val, (int, float)) and val > 0:
+            return round(float(val), 2)
+        return None
+
+    @classmethod
+    def _get_vendor_freight(cls, truck: TMSTruckDossier) -> Optional[float]:
+        """Retrieves vendor freight if explicitly provided; otherwise None (blank for Phase 2)."""
+        val = cls._get_field_val(truck, None, "vendor_freight_charges", None)
+        if val is not None and isinstance(val, (int, float)) and val > 0:
+            return round(float(val), 2)
+        return None
+
+    @classmethod
     def _populate_direct_booking(
         cls,
         ws: openpyxl.worksheet.worksheet.Worksheet,
@@ -117,8 +142,10 @@ class TMSExcelExporter:
                 24: cls._get_field_val(truck, None, "bank_name", ""),
                 25: cls._get_field_val(truck, None, "ifsc_code", ""),
                 26: cls._get_field_val(truck, None, "pan_number", ""),
-                27: cls._get_field_val(truck, None, "customer_freight_charges", ""),
-                28: cls._get_field_val(truck, None, "vendor_freight_charges", 0.0),
+                # Column 27: total customer freight (sum of LR freight, or truck total). Blank if none.
+                27: cls._get_truck_total_freight(truck),
+                # Column 28: vendor freight – left blank when not provided.
+                28: cls._get_vendor_freight(truck),
             }
 
             for col_idx in range(1, 29):
@@ -263,7 +290,7 @@ class TMSExcelExporter:
                 c55_basis = cls._get_field_val(truck, None, "billing_basis", "")
                 c56_adv_pct = cls._get_field_val(truck, None, "advance_pct", 0.0)
                 c57_upload = cls._get_field_val(truck, None, "upload_file_type", "")
-                c58_cust_freight = cls._get_field_val(truck, None, "customer_freight_charges", "")
+                c58_cust_freight = cls._get_truck_total_freight(truck)
                 c59_cust_load = cls._get_field_val(truck, None, "customer_loading_charges", 0.0)
                 c60_cust_unload = cls._get_field_val(truck, None, "customer_unloading_charges", 0.0)
                 c61_cust_det = cls._get_field_val(truck, None, "customer_detention_charges", 0.0)
@@ -271,7 +298,7 @@ class TMSExcelExporter:
                 # 63: Customer Total Charges (auto) -> formula
                 c63_cust_tot_formula = f"=SUM(BF{r}:BJ{r})"
 
-                c64_vend_freight = cls._get_field_val(truck, None, "vendor_freight_charges", 0.0)
+                c64_vend_freight = cls._get_vendor_freight(truck)
                 c65_vend_load = cls._get_field_val(truck, None, "vendor_loading_charges", 0.0)
                 c66_vend_unload = cls._get_field_val(truck, None, "vendor_unloading_charges", 0.0)
                 c67_vend_det = cls._get_field_val(truck, None, "vendor_detention_charges", 0.0)

@@ -47,6 +47,36 @@ def extract_customer_root(name: str) -> str:
     return words[0] if words else clean.strip()
 
 
+def find_matching_despatch_invoice(
+    inv: str, despatch_by_inv: dict[str, ErodeDespatchRow]
+) -> Optional[ErodeDespatchRow]:
+    """Matches an LR invoice number against Despatch invoices with prefix and OCR digit error tolerance."""
+    if not inv:
+        return None
+    inv_clean = re.sub(r"[^\d]", "", inv)
+    if not inv_clean:
+        return None
+
+    if inv_clean in despatch_by_inv:
+        return despatch_by_inv[inv_clean]
+
+    # Tolerate OCR prefix errors (e.g. 185... -> 125...)
+    if len(inv_clean) >= 6:
+        for prefix in ("125", "185", "126", "123", "725"):
+            cand = prefix + inv_clean[3:]
+            if cand in despatch_by_inv:
+                return despatch_by_inv[cand]
+
+    # Tolerate suffix matching if last 4-5 digits match exactly one invoice
+    if len(inv_clean) >= 4:
+        suffix = inv_clean[-4:]
+        matches = [d for k, d in despatch_by_inv.items() if k.endswith(suffix)]
+        if len(matches) == 1:
+            return matches[0]
+
+    return None
+
+
 class ErodeLinker:
     """Links Erode LR rows to their respective Despatch Details invoice lines."""
 
@@ -125,13 +155,22 @@ class ErodeLinker:
                 linked_rows: list[ErodeDespatchRow] = []
                 missing_invs: list[str] = []
 
-                # Stage A: Match by Invoice Number
+                # Stage A: Match by Invoice Number (with OCR tolerance)
                 for inv in lr_row.invoices:
-                    if inv in despatch_by_inv:
-                        linked_rows.append(despatch_by_inv[inv])
-                        claimed_invoices.add(inv)
-                    else:
+                    matched_d = find_matching_despatch_invoice(inv, despatch_by_inv)
+                    if matched_d and matched_d.invoice_no not in claimed_invoices:
+                        linked_rows.append(matched_d)
+                        claimed_invoices.add(matched_d.invoice_no)
+                    elif not matched_d:
                         missing_invs.append(inv)
+
+                # Check raw_invoice_text for numbers if invoices list missed some
+                if not linked_rows and lr_row.raw_invoice_text and despatch_sheet:
+                    for d_row in despatch_sheet.rows:
+                        if d_row.invoice_no not in claimed_invoices:
+                            if d_row.invoice_no in lr_row.raw_invoice_text or d_row.invoice_no[-4:] in lr_row.raw_invoice_text:
+                                linked_rows.append(d_row)
+                                claimed_invoices.add(d_row.invoice_no)
 
                 # Stage B: Match by Customer Name keyword overlap
                 if not linked_rows and despatch_sheet:
@@ -153,6 +192,33 @@ class ErodeLinker:
                         )
                     )
 
+            # Stage B.5: Sequential pairing for remaining unmatched LR rows and Despatch customer groups
+            unmatched_lrs = [r for r in lr_sheet.rows if not any(c.lr_row == r for c in consignments)]
+            if unmatched_lrs and despatch_sheet:
+                remaining_despatch = [r for r in despatch_sheet.rows if r.invoice_no not in claimed_invoices]
+                # Group remaining despatch rows by customer root preserving order
+                remaining_groups: list[list[ErodeDespatchRow]] = []
+                seen_roots: dict[str, int] = {}
+                for d_row in remaining_despatch:
+                    root = extract_customer_root(d_row.customer_name)
+                    if root not in seen_roots:
+                        seen_roots[root] = len(remaining_groups)
+                        remaining_groups.append([d_row])
+                    else:
+                        remaining_groups[seen_roots[root]].append(d_row)
+
+                if len(unmatched_lrs) == len(remaining_groups):
+                    for lr_r, d_grp in zip(unmatched_lrs, remaining_groups):
+                        for d in d_grp:
+                            claimed_invoices.add(d.invoice_no)
+                        consignments.append(
+                            LinkedErodeConsignment(
+                                lr_row=lr_r,
+                                linked_despatch_rows=d_grp,
+                                unmatched_invoices=[],
+                            )
+                        )
+
         # Stage C: Unclaimed Despatch rows in Group booking (grouped per Customer)
         unassigned_despatch: list[ErodeDespatchRow] = []
         if despatch_sheet:
@@ -167,11 +233,15 @@ class ErodeLinker:
             base_num = int(available_lrs[0]) if available_lrs else 29687
             lr_idx = 0
 
-            # Group unassigned invoices by customer root
+            # Group unassigned invoices by customer root preserving order
             despatch_by_cust: dict[str, list[ErodeDespatchRow]] = {}
             for d_row in unassigned_despatch:
                 root = extract_customer_root(d_row.customer_name)
                 despatch_by_cust.setdefault(root, []).append(d_row)
+
+            unit_str = getattr(despatch_sheet, "package_unit", "bundles") if despatch_sheet else "bundles"
+            tot_bnd = despatch_sheet.total_bundles if despatch_sheet else None
+            tot_wt = despatch_sheet.total_gross_weight_kg if despatch_sheet else None
 
             for root, d_rows in despatch_by_cust.items():
                 while lr_idx < len(available_lrs) and available_lrs[lr_idx] in used_lrs:
@@ -184,17 +254,22 @@ class ErodeLinker:
                     lr_no = str(base_num + len(used_lrs))
                 used_lrs.add(lr_no)
 
-                unit_str = getattr(despatch_sheet, "package_unit", "bundles") if despatch_sheet else "bundles"
+                c_wt = sum(r.handwritten_weight_kg for r in d_rows if r.handwritten_weight_kg) or None
+                if c_wt and tot_bnd and tot_wt and tot_wt > 0:
+                    c_pkg = max(1, round(tot_bnd * (c_wt / tot_wt)))
+                else:
+                    c_pkg = len(d_rows)
+
                 gen_lr = ErodeLRRow(
                     lr_number=lr_no,
                     party_name=d_rows[0].customer_name,
                     delivery_to=d_rows[0].destination,
                     raw_invoice_text=", ".join(r.invoice_no for r in d_rows),
                     invoices=[r.invoice_no for r in d_rows],
-                    packages_str="Unspecified",
-                    package_count=None,
+                    packages_str=f"{c_pkg} {unit_str}",
+                    package_count=c_pkg,
                     package_type=unit_str,
-                    weight_kg=sum(r.handwritten_weight_kg for r in d_rows if r.handwritten_weight_kg) or None,
+                    weight_kg=c_wt,
                 )
                 consignments.append(
                     LinkedErodeConsignment(
@@ -205,6 +280,33 @@ class ErodeLinker:
                 )
 
             unassigned_despatch = []
+
+        # Final pass: Ensure every consignment has clean official customer name, weight, and packages
+        unit_str = getattr(despatch_sheet, "package_unit", "bundles") if despatch_sheet else "bundles"
+        tot_bnd = despatch_sheet.total_bundles if despatch_sheet else None
+        tot_wt = despatch_sheet.total_gross_weight_kg if despatch_sheet else None
+
+        for item in consignments:
+            lr_r = item.lr_row
+            d_rows = item.linked_despatch_rows
+            if d_rows:
+                # Update with official customer name and destination
+                if d_rows[0].customer_name and d_rows[0].customer_name != "Customer":
+                    lr_r.party_name = d_rows[0].customer_name
+                if d_rows[0].destination:
+                    lr_r.delivery_to = d_rows[0].destination
+
+                # Update weight if missing on LR
+                if lr_r.weight_kg is None or lr_r.weight_kg == 0.0:
+                    calc_wt = sum(r.handwritten_weight_kg for r in d_rows if r.handwritten_weight_kg)
+                    if calc_wt > 0:
+                        lr_r.weight_kg = calc_wt
+
+                # Update package count if missing on LR
+                if lr_r.package_count is None or lr_r.package_count == 0:
+                    if lr_r.weight_kg and tot_bnd and tot_wt and tot_wt > 0:
+                        lr_r.package_count = max(1, round(tot_bnd * (lr_r.weight_kg / tot_wt)))
+                        lr_r.packages_str = f"{lr_r.package_count} {unit_str}"
 
         return ErodeLinkResult(
             truck_number=truck_number,

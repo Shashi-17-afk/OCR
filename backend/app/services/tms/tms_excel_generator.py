@@ -97,8 +97,8 @@ class TMSExcelExporter:
                 4: cls._get_field_val(truck, None, "bill_to", ""),
                 5: cls._get_field_val(truck, None, "vehicle_type", "Open Body / Tarpaulin"),
                 6: cls._get_field_val(truck, None, "pickup_date", truck.booking_date),
-                7: truck.total_gross_weight_mt,
-                8: truck.total_packages,
+                7: truck.total_gross_weight_mt if truck.total_gross_weight_mt > 0 else "",
+                8: truck.total_packages if truck.total_packages > 0 else "",
                 9: cls._get_field_val(truck, None, "cargo_type", "Paper Reels / Bundles"),
                 10: cls._get_field_val(truck, None, "loading_points", "Pallipalayam / Erode"),
                 11: cls._get_field_val(truck, None, "unloading_points", ""),
@@ -106,7 +106,7 @@ class TMSExcelExporter:
                 13: cls._get_field_val(truck, first_c, "eway_expiry", ""),
                 14: cls._get_field_val(truck, first_c, "lr_number", first_c.lr_number if first_c else ""),
                 15: cls._get_field_val(truck, first_c, "invoice_no", ""),
-                16: cls._get_field_val(truck, first_c, "invoice_value", 0.0),
+                16: cls._get_field_val(truck, first_c, "invoice_value", ""),
                 17: cls._get_field_val(truck, first_c, "invoice_date", ""),
                 18: truck.truck_number,
                 19: cls._get_field_val(truck, None, "driver_name", ""),
@@ -117,7 +117,7 @@ class TMSExcelExporter:
                 24: cls._get_field_val(truck, None, "bank_name", ""),
                 25: cls._get_field_val(truck, None, "ifsc_code", ""),
                 26: cls._get_field_val(truck, None, "pan_number", ""),
-                27: truck.total_freight_rs,
+                27: cls._get_field_val(truck, None, "customer_freight_charges", ""),
                 28: cls._get_field_val(truck, None, "vendor_freight_charges", 0.0),
             }
 
@@ -126,12 +126,33 @@ class TMSExcelExporter:
                 val = row_vals.get(col_idx)
 
                 # Format appropriately
-                if col_idx in (7, 16, 27, 28) and isinstance(val, (int, float)):
+                if col_idx == 7:
+                    if isinstance(val, (int, float)) and val > 0:
+                        cell.value = float(val)
+                        cell.number_format = "#,##0.000"
+                    else:
+                        cell.value = ""
+                elif col_idx == 8:
+                    if isinstance(val, (int, float)) and val > 0:
+                        cell.value = int(val)
+                        cell.number_format = "#,##0"
+                    else:
+                        cell.value = ""
+                elif col_idx == 16:
+                    if isinstance(val, (int, float)) and val > 0:
+                        cell.value = float(val)
+                        cell.number_format = "#,##0.00"
+                    else:
+                        cell.value = ""
+                elif col_idx == 27:
+                    if isinstance(val, (int, float)):
+                        cell.value = float(val)
+                        cell.number_format = "#,##0.00"
+                    else:
+                        cell.value = ""
+                elif col_idx == 28 and isinstance(val, (int, float)):
                     cell.value = float(val)
-                    cell.number_format = "#,##0.00" if col_idx != 7 else "#,##0.000"
-                elif col_idx == 8 and isinstance(val, (int, float)):
-                    cell.value = int(val)
-                    cell.number_format = "#,##0"
+                    cell.number_format = "#,##0.00"
                 elif col_idx in (12, 14, 15, 18, 20, 22, 25, 26):
                     # Ensure identifiers with potential leading zeros are strings
                     cell.value = str(val) if val is not None and val != "" else ""
@@ -216,8 +237,8 @@ class TMSExcelExporter:
                 c31_code = c_item.consignment_code if c_item else "1A"
                 c32_ship_drop = c8_shipper
                 c33_party = cls._get_field_val(truck, c_item, "party_dropdown", "")
-                c34_packs = cls._get_field_val(truck, c_item, "no_of_packs", 0)
-                c35_wt = cls._get_field_val(truck, c_item, "weight", 0.0)
+                c34_packs = cls._get_field_val(truck, c_item, "no_of_packs", "")
+                c35_wt = cls._get_field_val(truck, c_item, "weight", "")
                 c36_unit_c = "MT"
                 c37_vol_c = cls._get_field_val(truck, c_item, "volume", "")
                 c38_lr = cls._get_field_val(truck, c_item, "lr_number", c_item.lr_number if c_item else "")
@@ -226,9 +247,9 @@ class TMSExcelExporter:
                 c41_expiry = cls._get_field_val(truck, c_item, "eway_expiry", "")
                 c42_desc = cls._get_field_val(truck, c_item, "description_cargo_type", "Paper Reels / Bundles")
                 c43_inv = cls._get_field_val(truck, c_item, "invoice_no", "")
-                c44_inv_val = cls._get_field_val(truck, c_item, "invoice_value", 0.0)
+                c44_inv_val = cls._get_field_val(truck, c_item, "invoice_value", "")
                 c45_inv_dt = cls._get_field_val(truck, c_item, "invoice_date", "")
-                c46_c_freight = cls._get_field_val(truck, c_item, "freight_charges", 0.0)
+                c46_c_freight = cls._get_field_val(truck, c_item, "freight_charges", "")
 
                 # Step 3: Vendor / Pricing - cols 47-72
                 c47_vendor = cls._get_field_val(truck, None, "vendor_name", "")
@@ -242,7 +263,7 @@ class TMSExcelExporter:
                 c55_basis = cls._get_field_val(truck, None, "billing_basis", "")
                 c56_adv_pct = cls._get_field_val(truck, None, "advance_pct", 0.0)
                 c57_upload = cls._get_field_val(truck, None, "upload_file_type", "")
-                c58_cust_freight = truck.total_freight_rs
+                c58_cust_freight = cls._get_field_val(truck, None, "customer_freight_charges", "")
                 c59_cust_load = cls._get_field_val(truck, None, "customer_loading_charges", 0.0)
                 c60_cust_unload = cls._get_field_val(truck, None, "customer_unloading_charges", 0.0)
                 c61_cust_det = cls._get_field_val(truck, None, "customer_detention_charges", 0.0)
@@ -297,13 +318,31 @@ class TMSExcelExporter:
                     if col_idx in (63, 69, 70, 71, 72):
                         cell.value = str(val)
                         cell.number_format = "#,##0.00" if col_idx != 70 else "0.00%"
-                    elif col_idx in (13, 35) and isinstance(val, (int, float)):
-                        cell.value = float(val)
-                        cell.number_format = "#,##0.000"
-                    elif col_idx in (12, 34) and isinstance(val, (int, float)):
-                        cell.value = int(val)
-                        cell.number_format = "#,##0"
-                    elif col_idx in (44, 46, 56, 58, 59, 60, 61, 62, 64, 65, 66, 67, 68) and isinstance(val, (int, float)):
+                    elif col_idx in (13, 35):
+                        if isinstance(val, (int, float)) and val > 0:
+                            cell.value = float(val)
+                            cell.number_format = "#,##0.000"
+                        else:
+                            cell.value = ""
+                    elif col_idx in (12, 34):
+                        if isinstance(val, (int, float)) and val > 0:
+                            cell.value = int(val)
+                            cell.number_format = "#,##0"
+                        else:
+                            cell.value = ""
+                    elif col_idx == 44:
+                        if isinstance(val, (int, float)) and val > 0:
+                            cell.value = float(val)
+                            cell.number_format = "#,##0.00"
+                        else:
+                            cell.value = ""
+                    elif col_idx in (46, 58):
+                        if isinstance(val, (int, float)):
+                            cell.value = float(val)
+                            cell.number_format = "#,##0.00"
+                        else:
+                            cell.value = ""
+                    elif col_idx in (56, 59, 60, 61, 62, 64, 65, 66, 67, 68) and isinstance(val, (int, float)):
                         cell.value = float(val)
                         cell.number_format = "#,##0.00"
                     elif col_idx in (23, 25, 26, 38, 40, 43, 49, 52, 53):

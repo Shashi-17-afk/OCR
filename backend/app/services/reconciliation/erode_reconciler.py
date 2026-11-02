@@ -105,8 +105,13 @@ class ErodeReconciler:
                 )
 
             # E. Packages
-            # Individual consignment packages are only assigned when explicitly recorded in source
             total_packs = lr.package_count or 0
+            if total_packs == 0 and despatch_sheet:
+                if booking_type == BookingType.DIRECT or len(link_res.consignments) == 1:
+                    total_packs = despatch_sheet.total_bundles or 0
+                elif despatch_sheet.total_bundles and despatch_sheet.total_gross_weight_kg and gov_weight_kg > 0:
+                    total_packs = max(1, round(despatch_sheet.total_bundles * (gov_weight_kg / despatch_sheet.total_gross_weight_kg)))
+
             truck_total_packages += total_packs
             if total_packs == 0:
                 audit_notes.append(
@@ -115,16 +120,32 @@ class ErodeReconciler:
 
             # F. Freight Calculation (PRD §5.4, §6.1, §6.2)
             if despatch_rows:
-                total_frt = sum(r.freight_amount for r in despatch_rows)
+                frt_vals = [r.freight_amount for r in despatch_rows if r.freight_amount is not None]
+                if frt_vals:
+                    freight_amount = round(sum(frt_vals), 2)
+                    is_party_freight = (freight_amount == 0.0)
+                else:
+                    if any(getattr(r, "is_genuine_zero_freight", False) for r in despatch_rows) or booking_type == BookingType.DIRECT:
+                        freight_amount = 0.0
+                        is_party_freight = True
+                    else:
+                        freight_amount = None
+                        is_party_freight = False
             else:
-                total_frt = 0.0
-
-            freight_amount = round(total_frt, 2)
-            is_party_freight = (freight_amount == 0.0)
+                if booking_type == BookingType.DIRECT:
+                    freight_amount = 0.0
+                    is_party_freight = True
+                else:
+                    freight_amount = None
+                    is_party_freight = False
 
             if is_party_freight:
                 audit_notes.append(
                     "Party freight (Frt Amt = 0); freight charged to dealer/consignee = 0. Staff enter Bill To manually."
+                )
+            elif freight_amount is None:
+                audit_notes.append(
+                    "Freight charges missing from source document."
                 )
 
             # G. E-Way Bills (PRD §4 & §5.3)
@@ -140,6 +161,8 @@ class ErodeReconciler:
             inv_pages = [despatch_sheet.page_number] if despatch_sheet else []
             ewb_pages = [despatch_sheet.page_number] if (despatch_sheet and ewbs) else []
 
+            inv_dt = link_res.booking_date if link_res.booking_date and link_res.booking_date != "UNKNOWN_DATE" else None
+
             reconciled_consignments.append(
                 ConsignmentReconciliation(
                     consignment_id=f"ERODE_{link_res.truck_number}_{lr_norm}",
@@ -148,6 +171,7 @@ class ErodeReconciler:
                     lr_number_normalized=lr_norm,
                     truck_number=link_res.truck_number,
                     booking_date=link_res.booking_date,
+                    invoice_date=inv_dt,
                     delivery_place=delivery_place,
                     consignee=consignee,
                     ship_to=delivery_place,
@@ -197,8 +221,8 @@ class ErodeReconciler:
             truck_total_packages = despatch_sheet.total_bundles
 
         truck_total_weight_mt = round(truck_total_weight_kg / 1000.0, 3)
-        truck_total_freight_rs = round(sum(c.freight_amount for c in reconciled_consignments), 2)
-        truck_total_value_rs = round(sum(c.total_value_rs for c in reconciled_consignments), 2)
+        truck_total_freight_rs = round(sum(c.freight_amount for c in reconciled_consignments if c.freight_amount is not None), 2)
+        truck_total_value_rs = round(sum(c.total_value_rs for c in reconciled_consignments if c.total_value_rs is not None), 2)
         dossier_status = ReconciliationStatus.CONFIRMED
         if any(c.status != ReconciliationStatus.CONFIRMED for c in reconciled_consignments):
             dossier_status = ReconciliationStatus.REVIEW_REQUIRED_DISCREPANCY

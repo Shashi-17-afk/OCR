@@ -391,15 +391,32 @@ class TMSMapperService:
         )
 
         # 8. Customer Freight Charges
+        has_party_frt = any(c.is_party_freight for c in dossier.reconciled_consignments)
+        has_any_frt = any(c.freight_amount is not None for c in dossier.reconciled_consignments)
         freight_rs = dossier.truck_total_freight_rs
-        freight_status = FieldStatus.VERIFIED if freight_rs > 0.0 else FieldStatus.NEEDS_REVIEW
-        freight_note = "Party Freight (0.00 / Dealer pays directly)" if freight_rs == 0.0 else None
+
+        if freight_rs is not None and freight_rs > 0.0:
+            freight_val = round(freight_rs, 2)
+            freight_status = FieldStatus.VERIFIED
+            freight_note = None
+            freight_conf = 0.95
+        elif has_party_frt or (has_any_frt and freight_rs == 0.0):
+            freight_val = 0.0
+            freight_status = FieldStatus.VERIFIED
+            freight_note = "Party Freight (0.00 / Dealer pays directly)"
+            freight_conf = 0.90
+        else:
+            freight_val = None
+            freight_status = FieldStatus.NOT_FOUND
+            freight_note = "Freight charges missing from source document"
+            freight_conf = 0.0
+
         trip_fields["customer_freight_charges"] = TMSExtractedField(
             field_name="Customer Freight Charges *",
             clean_id="customer_freight_charges",
-            value=round(freight_rs, 2),
+            value=freight_val,
             status=freight_status,
-            confidence=0.90 if freight_rs > 0.0 else 0.70,
+            confidence=freight_conf,
             source_page=min(source_pages) if source_pages else 1,
             source_doc="Despatch Freight / LR Rate",
             audit_note=freight_note,
@@ -849,25 +866,58 @@ class TMSMapperService:
         c_fields["invoice_value"] = TMSExtractedField(
             field_name="Invoice Value",
             clean_id="invoice_value",
-            value=round(val_rs, 2) if val_rs > 0.0 else None,
-            status=FieldStatus.VERIFIED if val_rs > 0.0 else FieldStatus.NOT_FOUND,
-            confidence=0.92 if val_rs > 0.0 else 0.0,
+            value=round(val_rs, 2) if (val_rs is not None and val_rs > 0.0) else None,
+            status=FieldStatus.VERIFIED if (val_rs is not None and val_rs > 0.0) else FieldStatus.NOT_FOUND,
+            confidence=0.92 if (val_rs is not None and val_rs > 0.0) else 0.0,
             source_page=rc.invoice_pages[0] if rc.invoice_pages else rc.source_page,
             source_doc="Invoice Subtotal / Value",
             is_mandatory=False,
             data_type=TMSFieldDataType.NUMBER,
         )
 
-        # 13. Freight Charges (at consignment level)
+        # 13. Invoice Date
+        inv_date = getattr(rc, "invoice_date", None) or rc.booking_date
+        inv_dt_status = FieldStatus.VERIFIED if inv_date and inv_date != "UNKNOWN_DATE" else FieldStatus.NOT_FOUND
+        c_fields["invoice_date"] = TMSExtractedField(
+            field_name="Invoice Date",
+            clean_id="invoice_date",
+            value=inv_date if inv_dt_status == FieldStatus.VERIFIED else None,
+            status=inv_dt_status,
+            confidence=0.95 if inv_dt_status == FieldStatus.VERIFIED else 0.0,
+            source_page=rc.invoice_pages[0] if rc.invoice_pages else rc.source_page,
+            source_doc="Tax Invoice Header / Despatch Date",
+            is_mandatory=False,
+            data_type=TMSFieldDataType.DATE,
+        )
+
+        # 14. Freight Charges (at consignment level)
         f_amt = rc.freight_amount
-        f_status = FieldStatus.VERIFIED if f_amt > 0.0 else FieldStatus.NEEDS_REVIEW
-        f_note = "Party Freight (0.00 / Dealer pays)" if f_amt == 0.0 else None
+        if f_amt is not None:
+            if f_amt > 0.0:
+                f_status = FieldStatus.VERIFIED
+                f_note = None
+            else:
+                f_status = FieldStatus.VERIFIED
+                f_note = "Party Freight (0.00 / Dealer pays directly)"
+            f_val = round(f_amt, 2)
+            f_conf = 0.95
+        elif rc.is_party_freight:
+            f_status = FieldStatus.VERIFIED
+            f_note = "Party Freight (0.00 / Dealer pays directly)"
+            f_val = 0.0
+            f_conf = 0.90
+        else:
+            f_status = FieldStatus.NOT_FOUND
+            f_note = "Freight charges missing from source document"
+            f_val = None
+            f_conf = 0.0
+
         c_fields["freight_charges"] = TMSExtractedField(
             field_name="Freight Charges",
             clean_id="freight_charges",
-            value=round(f_amt, 2),
+            value=f_val,
             status=f_status,
-            confidence=0.90 if f_amt > 0.0 else 0.70,
+            confidence=f_conf,
             source_page=rc.source_page,
             source_doc="Despatch Freight / LR Rate",
             audit_note=f_note,

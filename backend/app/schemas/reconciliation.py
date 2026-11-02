@@ -86,9 +86,10 @@ class ConsignmentReconciliation(BaseModel):
     )
 
     # Freight (PRD §5.4)
-    freight_amount: float = Field(
+    freight_amount: Optional[float] = Field(
+        default=None,
         ge=0.0,
-        description="Freight charge (0.0 = Party Freight / dealer pays, >0 = Shipper Freight)",
+        description="Freight charge (0.0 = Party Freight / dealer pays, >0 = Shipper Freight, None = missing)",
     )
     is_party_freight: bool = Field(
         default=True,
@@ -102,6 +103,10 @@ class ConsignmentReconciliation(BaseModel):
     # Value & Government Waybills (PRD §4)
     total_value_rs: float = Field(
         ge=0.0, description="Total consignment value summed from invoices"
+    )
+    invoice_date: Optional[str] = Field(
+        default=None,
+        description="Invoice date (YYYY-MM-DD)",
     )
     eway_bills_cell: str = Field(
         description="Comma-separated 12-digit E-Way Bill numbers"

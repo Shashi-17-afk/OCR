@@ -16,9 +16,21 @@ class ErodeDespatchRow(BaseModel):
         default=None,
         description="Handwritten gross weight written beside the destination",
     )
-    freight_amount: float = Field(
-        default=0.0,
-        description="Frt Amt printed on the despatch line (0 = party freight)",
+    net_weight_kg: Optional[float] = Field(
+        default=None,
+        description="Net weight extracted from line item if distinct column present",
+    )
+    gross_weight_kg: Optional[float] = Field(
+        default=None,
+        description="Gross weight extracted from line item if distinct column present",
+    )
+    freight_amount: Optional[float] = Field(
+        default=None,
+        description="Frt Amt printed on the despatch line (0 = party freight, None = missing)",
+    )
+    is_genuine_zero_freight: bool = Field(
+        default=False,
+        description="True if freight was explicitly recorded as 0.0 (party freight)",
     )
     eway_bill_no: Optional[str] = Field(
         default=None,

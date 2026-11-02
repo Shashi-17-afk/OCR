@@ -65,6 +65,68 @@ class ErodeDespatchExtractor:
             rows = cls._extract_rows(text)
         bundles, gross_wt, net_wt, no_inv, package_unit = cls._extract_totals(text)
 
+        # Cross-reconcile individual row weights against total gross weight, net weight, and tare ratio
+        if rows and gross_wt and gross_wt > 0:
+            if len(rows) == 1:
+                if rows[0].handwritten_weight_kg is None:
+                    rows[0].handwritten_weight_kg = gross_wt
+                    rows[0].gross_weight_kg = gross_wt
+            else:
+                frt_rows = [r for r in rows if r.freight_amount and r.freight_amount > 0]
+                tot_frt = sum(r.freight_amount for r in frt_rows)
+
+                # Case A: Every row has non-zero freight -> direct governing gross weight allocation
+                if len(frt_rows) == len(rows) and tot_frt > 0:
+                    rate = tot_frt / gross_wt
+                    for r in rows:
+                        r.handwritten_weight_kg = round(r.freight_amount / rate, 1)
+                        r.gross_weight_kg = r.handwritten_weight_kg
+                    sum_wt = sum(r.handwritten_weight_kg for r in rows)
+                    diff = round(gross_wt - sum_wt, 1)
+                    if abs(diff) > 0 and abs(diff) < 10.0:
+                        max_r = max(rows, key=lambda r: r.handwritten_weight_kg or 0.0)
+                        max_r.handwritten_weight_kg = round(max_r.handwritten_weight_kg + diff, 1)
+                        max_r.gross_weight_kg = max_r.handwritten_weight_kg
+                else:
+                    # Case B: Some rows or party freight
+                    candidate_rates = []
+                    for r in frt_rows:
+                        if r.handwritten_weight_kg and 50.0 <= r.handwritten_weight_kg <= gross_wt:
+                            row_rate = r.freight_amount / r.handwritten_weight_kg
+                            if 0.5 <= row_rate <= 10.0:
+                                candidate_rates.append(row_rate)
+
+                    effective_rate = sum(candidate_rates) / len(candidate_rates) if candidate_rates else None
+                    if effective_rate:
+                        for r in rows:
+                            if r.freight_amount and r.freight_amount > 0:
+                                exp_wt = r.freight_amount / effective_rate
+                                curr_wt = r.handwritten_weight_kg
+                                if curr_wt is None or curr_wt < 50.0 or curr_wt > gross_wt or abs(curr_wt - exp_wt) / exp_wt > 0.20:
+                                    r.handwritten_weight_kg = round(exp_wt, 1)
+                                    r.gross_weight_kg = r.handwritten_weight_kg
+
+                    valid_weights = [r.handwritten_weight_kg for r in rows if r.handwritten_weight_kg is not None]
+                    if len(valid_weights) == len(rows):
+                        sum_wt = sum(valid_weights)
+                        # Check if extracted row weights match Net Weight instead of Gross Weight, apply tare ratio
+                        if net_wt and net_wt > 0 and abs(sum_wt - net_wt) <= max(10.0, net_wt * 0.02) and gross_wt > net_wt:
+                            tare_ratio = gross_wt / net_wt
+                            for r in rows:
+                                if r.handwritten_weight_kg is not None:
+                                    r.net_weight_kg = r.handwritten_weight_kg
+                                    r.handwritten_weight_kg = round(r.handwritten_weight_kg * tare_ratio, 1)
+                                    r.gross_weight_kg = r.handwritten_weight_kg
+                            sum_wt = sum(r.handwritten_weight_kg for r in rows if r.handwritten_weight_kg is not None)
+
+                        # Check if extracted row weights match Gross Weight
+                        if abs(sum_wt - gross_wt) <= max(10.0, gross_wt * 0.02):
+                            diff = round(gross_wt - sum_wt, 1)
+                            if abs(diff) > 0 and abs(diff) < 10.0:
+                                max_r = max(rows, key=lambda r: r.handwritten_weight_kg or 0.0)
+                                max_r.handwritten_weight_kg = round(max_r.handwritten_weight_kg + diff, 1)
+                                max_r.gross_weight_kg = max_r.handwritten_weight_kg
+
         # Confidence based on row completeness and totals match; flag if total gross/bundles missing
         if not gross_wt or not bundles:
             confidence = 0.45 if rows else 0.20
@@ -217,6 +279,31 @@ class ErodeDespatchExtractor:
         return name or "Customer", extracted_dest
 
     @classmethod
+    def _parse_first_weight(cls, items: list) -> Optional[float]:
+        """Cleans and extracts numeric weight token from OCR item list."""
+        if not items:
+            return None
+        text = " ".join(getattr(it, "text", "") for it in items)
+        clean = re.sub(r"\b(?:[A-Za-z]+)\b", " ", text)
+        clean = re.sub(r"(?<=\d)\)", "1", clean)
+        clean = re.sub(r"\)(?=\d)", "1", clean)
+        clean = re.sub(r"(?<=\d)\]", "1", clean)
+        clean = re.sub(r"\](?=\d)", "1", clean)
+        clean = re.sub(r"[:']", ".", clean)
+        for ch in [')', 'O', 'o']:
+            clean = clean.replace(ch, '0')
+        clean = clean.replace('b', '6').replace('H', '4').replace('S', '5').replace('~', '0').replace('-', '.')
+        matches = re.findall(r"\b(\d{2,6}(?:\.\d+)?)\b", clean)
+        for m in reversed(matches):
+            try:
+                val = float(m)
+                if 50.0 <= val <= 50000.0:
+                    return val
+            except ValueError:
+                pass
+        return None
+
+    @classmethod
     def _extract_rows_spatial(cls, ocr_lines: list, page_dest_hint: str = "UNKNOWN") -> list[ErodeDespatchRow]:
         """Extracts table rows using DPI-normalized 2D geometric token clustering."""
         if not ocr_lines:
@@ -239,11 +326,14 @@ class ErodeDespatchExtractor:
             if not box:
                 continue
             y_mid = sum(p[1] for p in box) / 4.0
+            x_mid = sum(p[0] for p in box) / 4.0
+            norm_x = x_mid / page_w
             if "inv no" in t or "cus name" in t:
                 header_y = max(header_y, y_mid)
-            if any(k in t for k in ["godown", "supervisor", "transporter", "total"]):
-                if y_mid > (page_h * 0.3):
-                    footer_y = min(footer_y, y_mid)
+            if any(k in t for k in ["supervisor signature", "transporter signature", "transporter's signature"]):
+                footer_y = min(footer_y, y_mid)
+            elif any(k in t for k in ["total", "transporter", "supervisor", "godown"]) and norm_x < 0.20 and y_mid > (page_h * 0.5):
+                footer_y = min(footer_y, y_mid)
 
         table_items = []
         for item in ocr_lines:
@@ -287,7 +377,7 @@ class ErodeDespatchExtractor:
                 bottom = (y_curr + y_next) / 2.0
                 row_bands.append((top, bottom, u_invs[i][1]))
 
-            # Pre-sort eway bills vertically
+            # Pre-sort eway bills vertically (x >= 0.78 * page_w)
             eway_items = []
             for _, it in table_items:
                 box = getattr(it, "box", [])
@@ -295,11 +385,28 @@ class ErodeDespatchExtractor:
                     continue
                 x_mid = sum(p[0] for p in box) / 4.0
                 y_mid = sum(p[1] for p in box) / 4.0
-                if (x_mid / page_w) >= 0.70:
+                if (x_mid / page_w) >= 0.78:
                     m = re.findall(r"(?:1)?(5\d{11}|5\d{10})", getattr(it, "text", ""))
                     if m:
                         eway_items.append((y_mid, m[0]))
             eway_items.sort(key=lambda x: x[0])
+
+            # Pre-sort freight items vertically (0.68 <= x/page_w < 0.82)
+            freight_items_list = []
+            for _, it in table_items:
+                box = getattr(it, "box", [])
+                if not box:
+                    continue
+                x_mid = sum(p[0] for p in box) / 4.0
+                y_mid = sum(p[1] for p in box) / 4.0
+                if 0.68 <= (x_mid / page_w) < 0.82:
+                    m = re.findall(r"\b(\d{1,6}(?:\.\d+)?)\b", getattr(it, "text", ""))
+                    if m:
+                        try:
+                            freight_items_list.append((y_mid, float(m[-1])))
+                        except ValueError:
+                            pass
+            freight_items_list.sort(key=lambda x: x[0])
 
             despatch_rows: list[ErodeDespatchRow] = []
             last_known_customer = "Customer"
@@ -317,9 +424,10 @@ class ErodeDespatchExtractor:
 
                 row_items = [it for it in row_items if not any(ex in getattr(it, "text", "").upper() for ex in cls.EXCLUDE_KEYWORDS)]
 
-                cust_items = [it for it in row_items if 0.18 <= (sum(p[0] for p in getattr(it, "box", [[0, 0]])) / 4.0) / page_w < 0.44]
-                dest_items = [it for it in row_items if 0.44 <= (sum(p[0] for p in getattr(it, "box", [[0, 0]])) / 4.0) / page_w < 0.62]
-                freight_items = [it for it in row_items if 0.62 <= (sum(p[0] for p in getattr(it, "box", [[0, 0]])) / 4.0) / page_w < 0.72]
+                cust_items = [it for it in row_items if 0.15 <= (sum(p[0] for p in getattr(it, "box", [[0, 0]])) / 4.0) / page_w < 0.44]
+                net_wt_items = [it for it in row_items if 0.44 <= (sum(p[0] for p in getattr(it, "box", [[0, 0]])) / 4.0) / page_w < 0.55]
+                gross_wt_items = [it for it in row_items if 0.55 <= (sum(p[0] for p in getattr(it, "box", [[0, 0]])) / 4.0) / page_w < 0.68]
+                frt_band_items = [it for it in row_items if 0.68 <= (sum(p[0] for p in getattr(it, "box", [[0, 0]])) / 4.0) / page_w < 0.82]
 
                 # Parse Customer Name
                 if cust_items:
@@ -329,9 +437,9 @@ class ErodeDespatchExtractor:
                         last_known_customer = cleaned_c
                 row_cust = last_known_customer
 
-                # Parse Destination
+                # Parse Destination across dest/weight items
                 row_dest = last_known_dest
-                dest_text = " ".join(getattr(it, "text", "") for it in dest_items)
+                dest_text = " ".join(getattr(it, "text", "") for it in (net_wt_items + gross_wt_items))
                 for city in cls.DEST_CITIES:
                     if re.search(r"\b" + re.escape(city) + r"\b", dest_text, re.I):
                         row_dest = "NAVI MUMBAI" if "NAVI" in city.upper() else city
@@ -343,23 +451,45 @@ class ErodeDespatchExtractor:
                         row_dest = emb_dest
                         last_known_dest = emb_dest
 
-                # Parse Freight
-                row_freight = 0.0
-                for it in freight_items:
-                    m = re.findall(r"\b(\d{2,6})\b", getattr(it, "text", ""))
-                    if m:
-                        try:
-                            row_freight = float(m[-1])
-                            break
-                        except ValueError:
-                            pass
+                # Explicitly detect both NetWt (x ≈ 0.45–0.55) and GrossWt (x ≈ 0.55–0.65)
+                row_net_wt = cls._parse_first_weight(net_wt_items)
+                row_gross_wt = cls._parse_first_weight(gross_wt_items)
+
+                # Always bind GrossWt to governing_weight_kg (fallback to NetWt if only NetWt present)
+                if row_gross_wt is not None and row_gross_wt > 0:
+                    row_weight = row_gross_wt
+                elif row_net_wt is not None and row_net_wt > 0:
+                    row_weight = row_net_wt
+                else:
+                    row_weight = None
+
+                # Parse Freight (distinguishing genuine 0 from missing)
+                row_freight = None
+                is_gen_zero = False
+                if len(freight_items_list) == len(row_bands):
+                    row_freight = freight_items_list[idx][1]
+                    is_gen_zero = (row_freight == 0.0)
+                else:
+                    candidates = [f for y, f in freight_items_list if (top - 15.0) <= y < (bottom + 15.0)]
+                    if candidates:
+                        row_freight = candidates[0]
+                        is_gen_zero = (row_freight == 0.0)
+                    elif frt_band_items:
+                        txt_f = " ".join(getattr(it, "text", "") for it in frt_band_items)
+                        m_f = re.findall(r"\b(\d{1,6}(?:\.\d+)?)\b", txt_f)
+                        if m_f:
+                            row_freight = float(m_f[-1])
+                            is_gen_zero = (row_freight == 0.0)
+                        elif "0" in txt_f or "party" in txt_f.lower():
+                            row_freight = 0.0
+                            is_gen_zero = True
 
                 # Parse E-Way Bill (assign sequential E-way bill if counts align, or by spatial proximity)
                 eway_val = None
                 if len(eway_items) == len(row_bands):
                     eway_val = eway_items[idx][1]
                 else:
-                    candidates = [ew for y, ew in eway_items if (top - 10.0) <= y < (bottom + 15.0)]
+                    candidates = [ew for y, ew in eway_items if (top - 15.0) <= y < (bottom + 15.0)]
                     if candidates:
                         eway_val = candidates[0]
 
@@ -369,8 +499,11 @@ class ErodeDespatchExtractor:
                         invoice_no=inv_no,
                         customer_name=row_cust,
                         destination=row_dest,
-                        handwritten_weight_kg=None,
+                        handwritten_weight_kg=row_weight,
+                        net_weight_kg=row_net_wt,
+                        gross_weight_kg=row_gross_wt or row_weight,
                         freight_amount=row_freight,
+                        is_genuine_zero_freight=is_gen_zero,
                         eway_bill_no=eway_val,
                         confidence=0.98,
                     )
@@ -410,7 +543,8 @@ class ErodeDespatchExtractor:
 
             inv_items = []
             cust_items = []
-            dest_items = []
+            net_wt_items = []
+            gross_wt_items = []
             freight_items = []
             eway_items = []
 
@@ -429,9 +563,11 @@ class ErodeDespatchExtractor:
                         inv_items.append((it, invs_all))
                 elif norm_x < 0.44:
                     cust_items.append(it)
-                elif norm_x < 0.62:
-                    dest_items.append(it)
-                elif norm_x < 0.72:
+                elif norm_x < 0.55:
+                    net_wt_items.append(it)
+                elif norm_x < 0.68:
+                    gross_wt_items.append(it)
+                elif norm_x < 0.82:
                     freight_items.append(it)
                 else:
                     eway_items.append(it)
@@ -447,12 +583,24 @@ class ErodeDespatchExtractor:
 
             # Parse Destination
             row_dest = last_known_dest
-            dest_text = " ".join(getattr(it, "text", "") for it in dest_items)
+            dest_text = " ".join(getattr(it, "text", "") for it in (net_wt_items + gross_wt_items))
             for city in cls.DEST_CITIES:
                 if re.search(r"\b" + re.escape(city) + r"\b", dest_text, re.I):
                     row_dest = "NAVI MUMBAI" if "NAVI" in city.upper() else city
                     last_known_dest = row_dest
                     break
+
+            # Parse Weight: Explicitly detect both NetWt (x ≈ 0.45–0.55) and GrossWt (x ≈ 0.55–0.65)
+            row_net_wt = cls._parse_first_weight(net_wt_items)
+            row_gross_wt = cls._parse_first_weight(gross_wt_items)
+
+            # Always bind GrossWt to governing_weight_kg (fallback to NetWt if only NetWt present)
+            if row_gross_wt is not None and row_gross_wt > 0:
+                row_weight = row_gross_wt
+            elif row_net_wt is not None and row_net_wt > 0:
+                row_weight = row_net_wt
+            else:
+                row_weight = None
 
             # Parse Customer Name
             if cust_items:
@@ -466,15 +614,22 @@ class ErodeDespatchExtractor:
             row_cust = last_known_customer
 
             # Parse Freight
-            row_freight = 0.0
+            row_freight = None
+            is_gen_zero = False
             for it in freight_items:
-                m = re.findall(r"\b(\d{2,6})\b", getattr(it, "text", ""))
+                m = re.findall(r"\b(\d{1,6}(?:\.\d+)?)\b", getattr(it, "text", ""))
                 if m:
                     try:
                         row_freight = float(m[-1])
+                        is_gen_zero = (row_freight == 0.0)
                         break
                     except ValueError:
                         pass
+            if row_freight is None and freight_items:
+                txt_f = " ".join(getattr(it, "text", "") for it in freight_items)
+                if "0" in txt_f or "party" in txt_f.lower():
+                    row_freight = 0.0
+                    is_gen_zero = True
 
             # Parse E-Way Bill (prioritize 12 digits)
             row_ways = []
@@ -496,8 +651,11 @@ class ErodeDespatchExtractor:
                         invoice_no=inv_no,
                         customer_name=row_cust,
                         destination=row_dest,
-                        handwritten_weight_kg=None,
+                        handwritten_weight_kg=row_weight,
+                        net_weight_kg=row_net_wt,
+                        gross_weight_kg=row_gross_wt or row_weight,
                         freight_amount=row_freight,
+                        is_genuine_zero_freight=is_gen_zero,
                         eway_bill_no=eway_val,
                         confidence=0.98,
                     )

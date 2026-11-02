@@ -111,6 +111,7 @@ class ErodeExtractionService:
                     text=text,
                     page_number=page_num,
                     page_image=page_image,
+                    ocr_lines=ocr_result.lines if ocr_result else None,
                 )
             elif class_res.classification == PageClassificationType.UNKNOWN_PAGE:
                 # Check for continuation sheet or ambiguous Despatch sheet
@@ -127,6 +128,7 @@ class ErodeExtractionService:
                         text=text,
                         page_number=page_num,
                         page_image=page_image,
+                        ocr_lines=ocr_result.lines if ocr_result else None,
                     )
                     if (candidate_lr and candidate_lr.rows) or any(k in text for k in ["1255", "1855", "296"]):
                         lr_data = candidate_lr

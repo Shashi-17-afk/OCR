@@ -272,15 +272,16 @@ class MaterialInvoiceExtractor:
         # 10. Freight Amount ("Add: Frieght" / "Add: Freight")
         # PRD §5.4: Amount 0 = party freight (dealer pays); amount above 0 = shipper pays
         frt_match = re.search(
-            r"(?:add[:\s]*frie?ght|freight\s*charges?)[:\s]*([\d\.,]+)",
+            r"(?:add[:\s]*frie?ght|freight\s*charges?)[:\s]*([\d,]+(?:\.\d+)?)",
             text,
             re.IGNORECASE,
         )
-        frt_val = (
-            float(frt_match.group(1).replace(",", ""))
-            if frt_match
-            else 0.0
-        )
+        frt_val = 0.0
+        if frt_match:
+            try:
+                frt_val = float(frt_match.group(1).replace(",", "").strip())
+            except (ValueError, TypeError):
+                frt_val = 0.0
         frt_field = ExtractedField[float](
             value=frt_val,
             raw_text=frt_match.group(0) if frt_match else "0.0 (Party Freight)",

@@ -304,10 +304,10 @@ class TirunelveliDocumentLinker:
 
             # Attach Security Copy
             if sec_pages:
-                sec_p = sec_pages[0]
-                sec_copy = sec_p.security_data
-                dossier_pages.append(sec_p.page_number)
-                page_accounting[sec_p.page_number] = f"truck:{truck_plate}:{date_str}"
+                sec_copy = sec_pages[0].security_data
+                for sec_p in sec_pages:
+                    dossier_pages.append(sec_p.page_number)
+                    page_accounting[sec_p.page_number] = f"truck:{truck_plate}:{date_str}"
             else:
                 dossier_flags.append("SECURITY_COPY_ABSENT: Gate sheet not present in this dossier")
 

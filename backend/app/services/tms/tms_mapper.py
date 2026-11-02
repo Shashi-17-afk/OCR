@@ -25,6 +25,7 @@ from backend.app.schemas.tms_booking import (
     TMSFieldDataType,
     TMSFieldDefinition,
     TMSFieldScope,
+    TMSInvoiceRecord,
     TMSManualCompletionRequest,
     TMSReadinessReport,
     TMSReviewResponse,
@@ -276,14 +277,45 @@ class TMSMapperService:
         missing_mandatory: list[str] = []
         needs_review: list[str] = []
 
-        # Determine origin mill and loading point based on loading point enum
-        is_erode = dossier.loading_point == LoadingPoint.ERODE
-        default_shipper = (
-            "Seshasayee Paper and Boards Limited" if is_erode else "Sun Paper Mill"
+        # Determine origin mill and loading point based on loading point enum and document signals
+        text_signals = []
+        if hasattr(dossier, "original_filename") and dossier.original_filename:
+            text_signals.append(str(dossier.original_filename).lower())
+        for c in dossier.reconciled_consignments:
+            if getattr(c, "delivery_place", None):
+                text_signals.append(str(c.delivery_place).lower())
+            if getattr(c, "consignee", None):
+                text_signals.append(str(c.consignee).lower())
+            if getattr(c, "packages_summary", None):
+                text_signals.append(str(c.packages_summary).lower())
+            for inv in (getattr(c, "invoices", None) or []):
+                if isinstance(inv, dict):
+                    text_signals.extend([str(v).lower() for v in inv.values() if isinstance(v, str)])
+                elif hasattr(inv, "__dict__"):
+                    text_signals.extend([str(v).lower() for v in inv.__dict__.values() if isinstance(v, str)])
+
+        full_signal_text = " ".join(text_signals)
+        is_tirunelveli = (
+            dossier.loading_point == LoadingPoint.TIRUNELVELI
+            or "tirunelveli" in full_signal_text
+            or "cheranmahadevi" in full_signal_text
+            or "sun paper" in full_signal_text
+            or "elanthaikulam" in full_signal_text
+            or "mukkudal" in full_signal_text
+            or "kunnamkulam" in full_signal_text
         )
-        default_loading_point = (
-            "Pallipalayam / Erode" if is_erode else "Cheranmahadevi / Tirunelveli"
-        )
+
+        is_sun_paper = "sun paper" in full_signal_text or "sun" in full_signal_text
+
+        if is_sun_paper:
+            default_shipper = "Sun Paper Mill"
+            default_loading_point = "Cheranmahadevi / Tirunelveli"
+        elif is_tirunelveli:
+            default_shipper = "Seshasayee Paper and Boards Limited"
+            default_loading_point = "Cheranmahadevi / Tirunelveli"
+        else:
+            default_shipper = "Seshasayee Paper and Boards Limited"
+            default_loading_point = "Pallipalayam / Erode"
 
         # Collect source pages
         source_pages: set[int] = set()
@@ -350,7 +382,10 @@ class TMSMapperService:
         )
 
         # 5. Weight (MT)
-        wt_mt = round(dossier.truck_total_weight_mt, 3)
+        calc_wt = dossier.truck_total_weight_mt
+        if not calc_wt or calc_wt <= 0.0:
+            calc_wt = sum(c.governing_weight_mt for c in dossier.reconciled_consignments if getattr(c, "governing_weight_mt", None))
+        wt_mt = round(calc_wt, 3) if calc_wt else 0.0
         wt_status = FieldStatus.VERIFIED if wt_mt > 0.0 else FieldStatus.NOT_FOUND
         trip_fields["weight_mt"] = TMSExtractedField(
             field_name="Weight (MT) *",
@@ -365,12 +400,30 @@ class TMSMapperService:
         )
 
         # 6. No Of Packages
+        calc_packs = dossier.truck_total_packages
+        if not calc_packs or calc_packs <= 0:
+            calc_packs = sum(c.total_packages for c in dossier.reconciled_consignments if getattr(c, "total_packages", None))
+
+        # Check for discrepancy between truck total packages and sum of consignments
+        sum_consign_packs = sum(c.total_packages for c in dossier.reconciled_consignments if getattr(c, "total_packages", None))
+        packs_status = FieldStatus.VERIFIED if calc_packs > 0 else FieldStatus.NOT_FOUND
+        packs_audit = None
+        if calc_packs > 0 and sum_consign_packs > 0 and len(dossier.reconciled_consignments) > 1 and calc_packs != sum_consign_packs:
+            packs_status = FieldStatus.NEEDS_REVIEW
+            diff_pkgs = sum_consign_packs - calc_packs
+            packs_audit = (
+                f"Discrepancy: Direct Booking reports {calc_packs} packages vs Group Booking "
+                f"total of {sum_consign_packs} packages (diff: {diff_pkgs:+d} packages)"
+            )
+            needs_review.append(f"Truck {dossier.truck_number}: {packs_audit}")
+
         trip_fields["no_of_packages"] = TMSExtractedField(
             field_name="No Of Packages",
             clean_id="no_of_packages",
-            value=dossier.truck_total_packages if dossier.truck_total_packages > 0 else None,
-            status=FieldStatus.VERIFIED if dossier.truck_total_packages > 0 else FieldStatus.NOT_FOUND,
-            confidence=0.95 if dossier.truck_total_packages > 0 else 0.0,
+            value=calc_packs if calc_packs > 0 else None,
+            status=packs_status,
+            confidence=0.95 if calc_packs > 0 else 0.0,
+            audit_note=packs_audit,
             source_page=min(source_pages) if source_pages else 1,
             source_doc="Package / Bundle / Reel Count",
             is_mandatory=False,
@@ -426,14 +479,25 @@ class TMSMapperService:
 
         # Unloading Points / Consignee Destination
         destinations = [c.delivery_place for c in dossier.reconciled_consignments if c.delivery_place]
+        if not destinations:
+            destinations = [c.consignee for c in dossier.reconciled_consignments if c.consignee]
+        if not destinations:
+            destinations = [c.bill_to for c in dossier.reconciled_consignments if c.bill_to]
         unique_destinations = list(dict.fromkeys(destinations))
         dest_val = ", ".join(unique_destinations) if unique_destinations else None
+        dest_is_unknown = not dest_val or "UNKNOWN" in dest_val.upper()
+        dest_status = FieldStatus.NEEDS_REVIEW if dest_is_unknown else FieldStatus.VERIFIED
+        dest_audit = "Destination unreadable or missing from source document; manual review required." if dest_is_unknown else None
+        if dest_is_unknown:
+            needs_review.append(f"Truck {dossier.truck_number}: Unloading point requires review ({dest_val or 'missing'})")
+
         trip_fields["unloading_points"] = TMSExtractedField(
             field_name="Unloading Points *" if is_group else "Consignee / Unloading Points *",
             clean_id="unloading_points",
             value=dest_val,
-            status=FieldStatus.VERIFIED if dest_val else FieldStatus.NOT_FOUND,
-            confidence=0.92 if dest_val else 0.0,
+            status=dest_status,
+            confidence=0.92 if not dest_is_unknown else 0.3,
+            audit_note=dest_audit,
             source_page=min(source_pages) if source_pages else 1,
             source_doc="Consignment Delivery Locations",
             is_mandatory=True,
@@ -645,28 +709,177 @@ class TMSMapperService:
                 data_type=TMSFieldDataType.NUMBER,
             )
 
-        # Consignments Mapping:
-        tms_consignments: list[TMSConsignmentItem] = []
+        # Consignments Mapping (group by LR to support multiple invoices per LR)
+        lr_map: dict[str, TMSConsignmentItem] = {}
         for c_idx, rc in enumerate(dossier.reconciled_consignments, 1):
-            letter = chr(ord('A') + (c_idx - 1) % 26)
-            c_code = f"{truck_index}{letter}"
+            lr_key = rc.lr_number_raw or f"LR_{c_idx}"
+            if lr_key not in lr_map:
+                # First time seeing this LR - create consignment item
+                letter = chr(ord('A') + (len(lr_map)) % 26)
+                c_code = f"{truck_index}{letter}"
+                c_fields = cls._map_single_consignment(
+                    rc=rc,
+                    c_idx=len(lr_map) + 1,
+                    c_code=c_code,
+                    default_shipper=default_shipper,
+                    is_group=is_group,
+                )
+                tms_c = TMSConsignmentItem(
+                    consignment_index=len(lr_map) + 1,
+                    consignment_code=c_code,
+                    lr_number=rc.lr_number_raw or "",
+                    source_page=rc.source_page,
+                    fields=c_fields,
+                    invoice_records=[],
+                )
+                lr_map[lr_key] = tms_c
+            else:
+                c_code = lr_map[lr_key].consignment_code
 
-            c_fields = cls._map_single_consignment(
-                rc=rc,
-                c_idx=c_idx,
-                c_code=c_code,
-                default_shipper=default_shipper,
-                is_group=is_group,
-            )
+            # Extract individual invoice records from corresponding Invoice objects
+            raw_invoices = getattr(rc, "invoices", None) or []
+            ewb_map = getattr(rc, "eway_bill_map", {}) or {}
 
-            tms_c = TMSConsignmentItem(
-                consignment_index=c_idx,
-                consignment_code=c_code,
-                lr_number=rc.lr_number_raw,
-                source_page=rc.source_page,
-                fields=c_fields,
-            )
-            tms_consignments.append(tms_c)
+            if raw_invoices:
+                for inv in raw_invoices:
+                    # 1. Individual Invoice Number
+                    if hasattr(inv, "invoice_number") and hasattr(inv.invoice_number, "value"):
+                        inv_no = inv.invoice_number.value
+                    elif hasattr(inv, "invoice_no"):
+                        inv_no = inv.invoice_no
+                    elif isinstance(inv, dict):
+                        inv_no = inv.get("invoice_no") or inv.get("invoice_number")
+                    else:
+                        inv_no = str(inv) if inv else None
+
+                    # 2. Individual Invoice Amount / Value
+                    if hasattr(inv, "net_claim_rs") and hasattr(inv.net_claim_rs, "value") and inv.net_claim_rs.value is not None:
+                        inv_val = round(float(inv.net_claim_rs.value), 2)
+                    elif hasattr(inv, "amount") and inv.amount is not None:
+                        inv_val = round(float(inv.amount), 2)
+                    elif hasattr(inv, "invoice_value") and inv.invoice_value is not None:
+                        inv_val = round(float(inv.invoice_value), 2)
+                    elif isinstance(inv, dict) and (inv.get("invoice_value") is not None or inv.get("amount") is not None):
+                        v = inv.get("invoice_value") if inv.get("invoice_value") is not None else inv.get("amount")
+                        inv_val = round(float(v), 2)
+                    else:
+                        inv_val = None
+
+                    # 3. Individual Invoice Date - NEVER use booking_date as fallback
+                    if hasattr(inv, "invoice_date"):
+                        d = getattr(inv.invoice_date, "value", inv.invoice_date)
+                        inv_date = str(d) if (d and d != "UNKNOWN_DATE") else None
+                    elif hasattr(inv, "date") and inv.date:
+                        d = inv.date
+                        inv_date = str(d) if (d and d != "UNKNOWN_DATE") else None
+                    elif isinstance(inv, dict) and (inv.get("invoice_date") or inv.get("date")):
+                        d = inv.get("invoice_date") or inv.get("date")
+                        inv_date = str(d) if (d and d != "UNKNOWN_DATE") else None
+                    else:
+                        inv_date = None
+
+                    # 4. E-Way Bill - explicit association ONLY (no positional matching)
+                    ewb_num = ewb_map.get(inv_no)
+                    if not ewb_num:
+                        if hasattr(inv, "eway_bill_number") and getattr(inv.eway_bill_number, "value", None):
+                            ewb_num = inv.eway_bill_number.value
+                        elif hasattr(inv, "eway_bill_no") and inv.eway_bill_no:
+                            ewb_num = inv.eway_bill_no
+                        elif isinstance(inv, dict) and inv.get("eway_bill"):
+                            ewb_num = inv.get("eway_bill")
+                        else:
+                            ewb_num = None
+
+                    # 5. Source Page
+                    if hasattr(inv, "source_page") and inv.source_page:
+                        src_p = inv.source_page
+                    elif hasattr(inv, "invoice_number") and getattr(inv.invoice_number, "source_page", None):
+                        src_p = inv.invoice_number.source_page
+                    elif rc.invoice_pages:
+                        src_p = rc.invoice_pages[0]
+                    else:
+                        src_p = rc.source_page
+
+                    # 6. Status Determination & Discrepancy Flagging
+                    if inv_no and (inv_val is not None) and inv_date and ewb_num:
+                        rec_status = FieldStatus.VERIFIED
+                    elif not inv_no:
+                        rec_status = FieldStatus.NOT_FOUND
+                    else:
+                        rec_status = FieldStatus.NEEDS_REVIEW
+
+                    if rec_status == FieldStatus.NEEDS_REVIEW:
+                        missing_parts = []
+                        if inv_val is None:
+                            missing_parts.append("amount")
+                        if not inv_date:
+                            missing_parts.append("date")
+                        if not ewb_num:
+                            missing_parts.append("verified E-Way Bill")
+                        needs_review.append(
+                            f"{c_code}: Invoice {inv_no} requires review (missing {', '.join(missing_parts)})"
+                        )
+
+                    lr_map[lr_key].invoice_records.append(
+                        TMSInvoiceRecord(
+                            invoice_no=inv_no,
+                            invoice_value=inv_val,
+                            invoice_date=inv_date,
+                            eway_bill=ewb_num,
+                            source_page=src_p,
+                            status=rec_status,
+                        )
+                    )
+
+            elif rc.unique_invoices:
+                # When individual invoice objects are unavailable, iterate unique invoice numbers
+                for inv_no in rc.unique_invoices:
+                    ewb_num = ewb_map.get(inv_no)
+                    src_p = rc.invoice_pages[0] if rc.invoice_pages else rc.source_page
+                    needs_review.append(
+                        f"{c_code}: Invoice {inv_no} requires review (missing individual amount/date)"
+                    )
+                    lr_map[lr_key].invoice_records.append(
+                        TMSInvoiceRecord(
+                            invoice_no=inv_no,
+                            invoice_value=None,
+                            invoice_date=None,
+                            eway_bill=ewb_num,
+                            source_page=src_p,
+                            status=FieldStatus.NEEDS_REVIEW,
+                        )
+                    )
+            else:
+                # Single aggregate consignment invoice fallback
+                inv_no = rc.compressed_invoices_cell or None
+                inv_val = round(rc.total_value_rs, 2) if (rc.total_value_rs and rc.total_value_rs > 0.0) else None
+                inv_date = rc.invoice_date if (rc.invoice_date and rc.invoice_date != "UNKNOWN_DATE") else None
+                ewb_num = rc.eway_bills_cell or None
+                src_p = rc.invoice_pages[0] if rc.invoice_pages else rc.source_page
+                rec_status = FieldStatus.VERIFIED if (inv_no and inv_val is not None and inv_date and ewb_num) else (
+                    FieldStatus.NOT_FOUND if not inv_no else FieldStatus.NEEDS_REVIEW
+                )
+                if rec_status == FieldStatus.NEEDS_REVIEW:
+                    needs_review.append(f"{c_code}: Invoice {inv_no or 'record'} requires manual review")
+                lr_map[lr_key].invoice_records.append(
+                    TMSInvoiceRecord(
+                        invoice_no=inv_no,
+                        invoice_value=inv_val,
+                        invoice_date=inv_date,
+                        eway_bill=ewb_num,
+                        source_page=src_p,
+                        status=rec_status,
+                    )
+                )
+
+            # Validate consistency of invoice count against unique_invoices
+            if rc.unique_invoices and len(lr_map[lr_key].invoice_records) != len(rc.unique_invoices):
+                needs_review.append(
+                    f"{c_code}: Invoice count mismatch (extracted {len(lr_map[lr_key].invoice_records)} vs expected {len(rc.unique_invoices)})"
+                )
+
+        # Convert the LR map to the ordered list expected by the response
+        tms_consignments = list(lr_map.values())
 
         # Audit missing mandatory fields across trip fields
         for f in trip_fields.values():
@@ -694,8 +907,8 @@ class TMSMapperService:
             source_pages=sorted(list(source_pages)),
             trip_fields=trip_fields,
             consignments=tms_consignments,
-            total_gross_weight_mt=round(dossier.truck_total_weight_mt, 3),
-            total_packages=dossier.truck_total_packages,
+            total_gross_weight_mt=wt_mt,
+            total_packages=calc_packs,
             total_freight_rs=round(dossier.truck_total_freight_rs, 2),
             total_value_rs=round(dossier.truck_total_value_rs, 2),
             missing_mandatory_fields=missing_mandatory,
@@ -753,6 +966,21 @@ class TMSMapperService:
             data_type=TMSFieldDataType.TEXT,
         )
 
+        c_dest = rc.delivery_place or party_name or None
+        c_dest_is_unknown = not c_dest or "UNKNOWN" in c_dest.upper()
+        c_fields["unloading_points"] = TMSExtractedField(
+            field_name="Consignee / Unloading Points *" if not is_group else "Unloading Points *",
+            clean_id="unloading_points",
+            value=c_dest,
+            status=FieldStatus.NEEDS_REVIEW if c_dest_is_unknown else FieldStatus.VERIFIED,
+            confidence=0.92 if not c_dest_is_unknown else 0.3,
+            audit_note="Destination unreadable or missing from source document; manual review required." if c_dest_is_unknown else None,
+            source_page=rc.source_page,
+            source_doc="Delivery Place / Consignee",
+            is_mandatory=True,
+            data_type=TMSFieldDataType.TEXT,
+        )
+
         # 4. No. Of Packs
         packs = rc.total_packages
         c_fields["no_of_packs"] = TMSExtractedField(
@@ -769,17 +997,41 @@ class TMSMapperService:
 
         # 5. Weight
         wt = round(rc.governing_weight_mt, 3)
+        wt_status = FieldStatus.VERIFIED if wt > 0.0 else FieldStatus.NOT_FOUND
         c_fields["weight"] = TMSExtractedField(
             field_name="Weight" if is_group else "Weight (MT) *",
             clean_id="weight",
             value=wt if wt > 0.0 else None,
-            status=FieldStatus.VERIFIED if wt > 0.0 else FieldStatus.NOT_FOUND,
+            status=wt_status,
             confidence=0.96 if wt > 0.0 else 0.0,
             source_page=rc.source_page,
             source_doc=f"{rc.governing_weight_kg:.1f} kg / 1000",
             is_mandatory=not is_group,
             data_type=TMSFieldDataType.NUMBER,
         )
+
+        # Handwritten LR Weight & Discrepancy Flagging (kept independently per consignment)
+        lr_cross_kg = rc.lr_crosscheck_weight_kg
+        c_fields["handwritten_weight_kg"] = TMSExtractedField(
+            field_name="Handwritten LR Weight (kg)",
+            clean_id="handwritten_weight_kg",
+            value=lr_cross_kg,
+            status=FieldStatus.VERIFIED if lr_cross_kg is not None else FieldStatus.NOT_FOUND,
+            confidence=0.95 if lr_cross_kg is not None else 0.0,
+            source_page=rc.source_page,
+            source_doc="Handwritten LR Weight Note",
+            is_mandatory=False,
+            data_type=TMSFieldDataType.NUMBER,
+        )
+
+        # Flag discrepancy between governing invoice weight and handwritten LR weight
+        if lr_cross_kg is not None and abs(rc.governing_weight_kg - lr_cross_kg) > 5.0:
+            diff_kg = round(rc.governing_weight_kg - lr_cross_kg, 1)
+            c_fields["weight"].status = FieldStatus.NEEDS_REVIEW
+            c_fields["weight"].audit_note = (
+                f"Discrepancy: governing weight {rc.governing_weight_kg:.1f} kg vs "
+                f"handwritten LR weight {lr_cross_kg:.1f} kg (diff: {diff_kg:+.1f} kg)"
+            )
 
         # 6. Unit
         c_fields["unit"] = TMSExtractedField(
@@ -875,15 +1127,15 @@ class TMSMapperService:
             data_type=TMSFieldDataType.NUMBER,
         )
 
-        # 13. Invoice Date
-        inv_date = getattr(rc, "invoice_date", None) or rc.booking_date
-        inv_dt_status = FieldStatus.VERIFIED if inv_date and inv_date != "UNKNOWN_DATE" else FieldStatus.NOT_FOUND
+        # 13. Invoice Date (NEVER use booking_date as fallback)
+        inv_date = rc.invoice_date if (rc.invoice_date and rc.invoice_date != "UNKNOWN_DATE") else None
+        inv_dt_status = FieldStatus.VERIFIED if inv_date else FieldStatus.NOT_FOUND
         c_fields["invoice_date"] = TMSExtractedField(
             field_name="Invoice Date",
             clean_id="invoice_date",
-            value=inv_date if inv_dt_status == FieldStatus.VERIFIED else None,
+            value=inv_date,
             status=inv_dt_status,
-            confidence=0.95 if inv_dt_status == FieldStatus.VERIFIED else 0.0,
+            confidence=0.95 if inv_date else 0.0,
             source_page=rc.invoice_pages[0] if rc.invoice_pages else rc.source_page,
             source_doc="Tax Invoice Header / Despatch Date",
             is_mandatory=False,

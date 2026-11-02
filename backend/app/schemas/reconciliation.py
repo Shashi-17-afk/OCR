@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 from pydantic import BaseModel, Field
 
 from backend.app.schemas.classification import BookingType, LoadingPoint
@@ -46,6 +46,12 @@ class ConsignmentReconciliation(BaseModel):
     )
     unique_invoices: list[str] = Field(
         default_factory=list, description="List of unique confirmed invoice numbers"
+    )
+    invoices: list[Any] = Field(
+        default_factory=list, description="Individual invoice objects or line items linked to this LR"
+    )
+    eway_bill_map: dict[str, str] = Field(
+        default_factory=dict, description="Verified mapping from invoice number to E-Way Bill number"
     )
     physical_invoice_pages_count: int = Field(
         ge=0, description="Total physical invoice pages linked to this LR"

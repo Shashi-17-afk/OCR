@@ -65,6 +65,32 @@ class TMSExcelExporter:
         output_stream.seek(0)
         return output_stream.getvalue()
 
+    @staticmethod
+    def _to_float(val: Any) -> Optional[float]:
+        """Safely parses float from numeric or string values."""
+        if val is None or val == "":
+            return None
+        if isinstance(val, (int, float)):
+            return float(val)
+        try:
+            return float(str(val).replace(",", "").strip())
+        except (ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def _to_int(val: Any) -> Optional[int]:
+        """Safely parses int from numeric or string values."""
+        if val is None or val == "":
+            return None
+        if isinstance(val, int):
+            return val
+        if isinstance(val, float):
+            return int(val)
+        try:
+            return int(float(str(val).replace(",", "").strip()))
+        except (ValueError, TypeError):
+            return None
+
     @classmethod
     def _get_truck_total_freight(cls, truck: TMSTruckDossier) -> Optional[float]:
         """Calculates total customer freight for truck: sum of consignment freights, or truck total freight."""
@@ -113,6 +139,7 @@ class TMSExcelExporter:
         for truck in trucks:
             # Map fields for Direct Booking
             first_c = truck.consignments[0] if truck.consignments else None
+            first_inv = first_c.invoice_records[0] if (first_c and first_c.invoice_records) else None
 
             # Values mapping by column index (1-based)
             row_vals: dict[int, Any] = {
@@ -122,18 +149,18 @@ class TMSExcelExporter:
                 4: cls._get_field_val(truck, None, "bill_to", ""),
                 5: cls._get_field_val(truck, None, "vehicle_type", "Open Body / Tarpaulin"),
                 6: cls._get_field_val(truck, None, "pickup_date", truck.booking_date),
-                7: truck.total_gross_weight_mt if truck.total_gross_weight_mt > 0 else "",
-                8: truck.total_packages if truck.total_packages > 0 else "",
+                7: truck.total_gross_weight_mt if truck.total_gross_weight_mt > 0 else cls._get_field_val(truck, first_c, "weight", ""),
+                8: truck.total_packages if truck.total_packages > 0 else cls._get_field_val(truck, first_c, "no_of_packs", ""),
                 9: cls._get_field_val(truck, None, "cargo_type", "Paper Reels / Bundles"),
-                10: cls._get_field_val(truck, None, "loading_points", "Pallipalayam / Erode"),
-                11: cls._get_field_val(truck, None, "unloading_points", ""),
-                12: cls._get_field_val(truck, first_c, "eway_bill", ""),
+                10: cls._get_field_val(truck, None, "loading_points", "Cheranmahadevi / Tirunelveli"),
+                11: cls._get_field_val(truck, first_c, "unloading_points", cls._get_field_val(truck, first_c, "party_dropdown", "")),
+                12: (first_inv.eway_bill if (first_inv and first_inv.eway_bill) else cls._get_field_val(truck, first_c, "eway_bill", "")),
                 13: cls._get_field_val(truck, first_c, "eway_expiry", ""),
                 14: cls._get_field_val(truck, first_c, "lr_number", first_c.lr_number if first_c else ""),
-                15: cls._get_field_val(truck, first_c, "invoice_no", ""),
-                16: cls._get_field_val(truck, first_c, "invoice_value", ""),
-                17: cls._get_field_val(truck, first_c, "invoice_date", ""),
-                18: truck.truck_number,
+                15: (first_inv.invoice_no if (first_inv and first_inv.invoice_no) else cls._get_field_val(truck, first_c, "invoice_no", "")),
+                16: (first_inv.invoice_value if (first_inv and first_inv.invoice_value is not None) else cls._get_field_val(truck, first_c, "invoice_value", "")),
+                17: (first_inv.invoice_date if (first_inv and first_inv.invoice_date) else cls._get_field_val(truck, first_c, "invoice_date", "")),
+                18: cls._get_field_val(truck, None, "license_plate", truck.truck_number),
                 19: cls._get_field_val(truck, None, "driver_name", ""),
                 20: cls._get_field_val(truck, None, "driver_phone", ""),
                 21: cls._get_field_val(truck, None, "vendor_name", ""),
@@ -154,32 +181,40 @@ class TMSExcelExporter:
 
                 # Format appropriately
                 if col_idx == 7:
-                    if isinstance(val, (int, float)) and val > 0:
-                        cell.value = float(val)
+                    f_val = cls._to_float(val)
+                    if f_val is not None and f_val > 0:
+                        cell.value = f_val
                         cell.number_format = "#,##0.000"
                     else:
                         cell.value = ""
                 elif col_idx == 8:
-                    if isinstance(val, (int, float)) and val > 0:
-                        cell.value = int(val)
+                    i_val = cls._to_int(val)
+                    if i_val is not None and i_val > 0:
+                        cell.value = i_val
                         cell.number_format = "#,##0"
                     else:
                         cell.value = ""
                 elif col_idx == 16:
-                    if isinstance(val, (int, float)) and val > 0:
-                        cell.value = float(val)
+                    f_val = cls._to_float(val)
+                    if f_val is not None and f_val > 0:
+                        cell.value = f_val
                         cell.number_format = "#,##0.00"
                     else:
                         cell.value = ""
                 elif col_idx == 27:
-                    if isinstance(val, (int, float)):
-                        cell.value = float(val)
+                    f_val = cls._to_float(val)
+                    if f_val is not None:
+                        cell.value = f_val
                         cell.number_format = "#,##0.00"
                     else:
                         cell.value = ""
-                elif col_idx == 28 and isinstance(val, (int, float)):
-                    cell.value = float(val)
-                    cell.number_format = "#,##0.00"
+                elif col_idx == 28:
+                    f_val = cls._to_float(val)
+                    if f_val is not None:
+                        cell.value = f_val
+                        cell.number_format = "#,##0.00"
+                    else:
+                        cell.value = ""
                 elif col_idx in (12, 14, 15, 18, 20, 22, 25, 26):
                     # Ensure identifiers with potential leading zeros are strings
                     cell.value = str(val) if val is not None and val != "" else ""
@@ -238,13 +273,13 @@ class TMSExcelExporter:
                 c9_bill_to = cls._get_field_val(truck, None, "bill_to", "")
                 c10_gstn = cls._get_field_val(truck, None, "branch_gstn", "")
                 c11_service = cls._get_field_val(truck, None, "service_type", "")
-                c12_packs_trip = truck.total_packages
-                c13_wt_trip = truck.total_gross_weight_mt
+                c12_packs_trip = truck.total_packages if truck.total_packages > 0 else cls._get_field_val(truck, c_item, "no_of_packs", "")
+                c13_wt_trip = truck.total_gross_weight_mt if truck.total_gross_weight_mt > 0 else cls._get_field_val(truck, c_item, "weight", "")
                 c14_unit = "MT"
                 c15_vol = cls._get_field_val(truck, None, "cubic_vol", "")
                 c16_cargo = cls._get_field_val(truck, None, "cargo_type", "Paper Reels / Bundles")
-                c17_load_point = cls._get_field_val(truck, None, "loading_points", "Pallipalayam / Erode")
-                c18_unload_point = cls._get_field_val(truck, None, "unloading_points", "")
+                c17_load_point = cls._get_field_val(truck, None, "loading_points", "Cheranmahadevi / Tirunelveli")
+                c18_unload_point = cls._get_field_val(truck, c_item, "unloading_points", cls._get_field_val(truck, c_item, "party_dropdown", ""))
                 c19_veh_type = cls._get_field_val(truck, None, "vehicle_type", "Open Body / Tarpaulin")
                 c20_del_on = cls._get_field_val(truck, None, "delivery_on", "")
                 c21_pod_on = cls._get_field_val(truck, None, "pod_on", "")
@@ -261,21 +296,22 @@ class TMSExcelExporter:
                 c30_gps = cls._get_field_val(truck, None, "gps_provider", "")
 
                 # Step 2: Consignment block (one row per LR) - cols 31-46
+                first_inv = c_item.invoice_records[0] if (c_item and c_item.invoice_records) else None
                 c31_code = c_item.consignment_code if c_item else "1A"
                 c32_ship_drop = c8_shipper
-                c33_party = cls._get_field_val(truck, c_item, "party_dropdown", "")
+                c33_party = cls._get_field_val(truck, c_item, "party_dropdown", cls._get_field_val(truck, c_item, "unloading_points", ""))
                 c34_packs = cls._get_field_val(truck, c_item, "no_of_packs", "")
                 c35_wt = cls._get_field_val(truck, c_item, "weight", "")
                 c36_unit_c = "MT"
                 c37_vol_c = cls._get_field_val(truck, c_item, "volume", "")
                 c38_lr = cls._get_field_val(truck, c_item, "lr_number", c_item.lr_number if c_item else "")
                 c39_lr_rem = cls._get_field_val(truck, c_item, "lr_remarks", "")
-                c40_eway = cls._get_field_val(truck, c_item, "eway_bill", "")
+                c40_eway = (first_inv.eway_bill if (first_inv and first_inv.eway_bill) else cls._get_field_val(truck, c_item, "eway_bill", ""))
                 c41_expiry = cls._get_field_val(truck, c_item, "eway_expiry", "")
                 c42_desc = cls._get_field_val(truck, c_item, "description_cargo_type", "Paper Reels / Bundles")
-                c43_inv = cls._get_field_val(truck, c_item, "invoice_no", "")
-                c44_inv_val = cls._get_field_val(truck, c_item, "invoice_value", "")
-                c45_inv_dt = cls._get_field_val(truck, c_item, "invoice_date", "")
+                c43_inv = (first_inv.invoice_no if (first_inv and first_inv.invoice_no) else cls._get_field_val(truck, c_item, "invoice_no", ""))
+                c44_inv_val = (first_inv.invoice_value if (first_inv and first_inv.invoice_value is not None) else cls._get_field_val(truck, c_item, "invoice_value", ""))
+                c45_inv_dt = (first_inv.invoice_date if (first_inv and first_inv.invoice_date) else cls._get_field_val(truck, c_item, "invoice_date", ""))
                 c46_c_freight = cls._get_field_val(truck, c_item, "freight_charges", "")
 
                 # Step 3: Vendor / Pricing - cols 47-72
@@ -346,32 +382,40 @@ class TMSExcelExporter:
                         cell.value = str(val)
                         cell.number_format = "#,##0.00" if col_idx != 70 else "0.00%"
                     elif col_idx in (13, 35):
-                        if isinstance(val, (int, float)) and val > 0:
-                            cell.value = float(val)
+                        f_val = cls._to_float(val)
+                        if f_val is not None and f_val > 0:
+                            cell.value = f_val
                             cell.number_format = "#,##0.000"
                         else:
                             cell.value = ""
                     elif col_idx in (12, 34):
-                        if isinstance(val, (int, float)) and val > 0:
-                            cell.value = int(val)
+                        i_val = cls._to_int(val)
+                        if i_val is not None and i_val > 0:
+                            cell.value = i_val
                             cell.number_format = "#,##0"
                         else:
                             cell.value = ""
                     elif col_idx == 44:
-                        if isinstance(val, (int, float)) and val > 0:
-                            cell.value = float(val)
+                        f_val = cls._to_float(val)
+                        if f_val is not None and f_val > 0:
+                            cell.value = f_val
                             cell.number_format = "#,##0.00"
                         else:
                             cell.value = ""
                     elif col_idx in (46, 58):
-                        if isinstance(val, (int, float)):
-                            cell.value = float(val)
+                        f_val = cls._to_float(val)
+                        if f_val is not None:
+                            cell.value = f_val
                             cell.number_format = "#,##0.00"
                         else:
                             cell.value = ""
-                    elif col_idx in (56, 59, 60, 61, 62, 64, 65, 66, 67, 68) and isinstance(val, (int, float)):
-                        cell.value = float(val)
-                        cell.number_format = "#,##0.00"
+                    elif col_idx in (56, 59, 60, 61, 62, 64, 65, 66, 67, 68):
+                        f_val = cls._to_float(val)
+                        if f_val is not None:
+                            cell.value = f_val
+                            cell.number_format = "#,##0.00"
+                        else:
+                            cell.value = ""
                     elif col_idx in (23, 25, 26, 38, 40, 43, 49, 52, 53):
                         # Leading zero preservation
                         cell.value = str(val) if val is not None and val != "" else ""

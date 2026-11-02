@@ -330,12 +330,20 @@ class ErodeBatchPartitioner:
         current_lr_sheets: list[ErodeLRSheet] = []
         current_page_nums: list[int] = []
 
-        # Collect authoritative batch date across confirmed despatch sheets in this ingested document
-        batch_booking_date: Optional[str] = None
+        # Collect authoritative batch date across all confirmed pages (majority consensus)
+        date_votes: dict[str, int] = {}
         for p in pages:
-            if p.despatch and p.despatch.date:
-                batch_booking_date = p.despatch.date
-                break
+            candidate_dt = None
+            if p.despatch and p.despatch.date and p.despatch.date != "UNKNOWN_DATE":
+                candidate_dt = p.despatch.date
+            elif p.lr_sheet and p.lr_sheet.date and p.lr_sheet.date != "UNKNOWN_DATE":
+                candidate_dt = p.lr_sheet.date
+            if candidate_dt:
+                date_votes[candidate_dt] = date_votes.get(candidate_dt, 0) + 1
+
+        batch_booking_date: Optional[str] = None
+        if date_votes:
+            batch_booking_date = max(date_votes.items(), key=lambda kv: kv[1])[0]
 
         for p in pages:
             if p.classification == PageClassificationType.DESPATCH_SHEET:
@@ -461,9 +469,21 @@ class ErodeBatchPartitioner:
             else:
                 consolidated_bundles.append(b)
 
-        # Ensure batch booking date inheritance for any truck missing date
+        # Reconcile booking dates against authoritative consensus batch booking date
         for b in consolidated_bundles:
             if (not b.booking_date or b.booking_date == "UNKNOWN_DATE") and batch_booking_date:
                 b.booking_date = batch_booking_date
+            elif b.booking_date and batch_booking_date and b.booking_date != batch_booking_date:
+                # Disambiguate common OCR 1 vs 7 digit substitution when day and year match batch consensus
+                try:
+                    dt_parts = b.booking_date.split("-")
+                    batch_parts = batch_booking_date.split("-")
+                    if len(dt_parts) == 3 and len(batch_parts) == 3:
+                        # e.g. 2026-07-29 vs 2026-01-29 (year 2026 and day 29 match)
+                        if dt_parts[0] == batch_parts[0] and dt_parts[2] == batch_parts[2]:
+                            if (dt_parts[1] == "07" and batch_parts[1] == "01") or (dt_parts[1] == "01" and batch_parts[1] == "07"):
+                                b.booking_date = batch_booking_date
+                except Exception:
+                    pass
 
         return consolidated_bundles

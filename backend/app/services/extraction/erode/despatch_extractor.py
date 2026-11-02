@@ -10,21 +10,21 @@ class ErodeDespatchExtractor:
     """Extracts structured invoice lines, weights, freights, and e-way bills from Erode Despatch Details sheets."""
 
     TRUCK_REGEX = re.compile(
-        r"(?:lorry\s*(?:number|no)|truck\s*(?:number|no)|vehicle\s*no)[\s:]*([A-Za-z]{2}\s*\d{1,2}\s*[A-Za-z0-9]{1,3}\s*\d{4})\b",
+        r"(?:lorry\s*(?:number|no)|truck\s*(?:number|no)|vehicle\s*no)[\s.:-]*([A-Za-z]{2}[\s.-]*\d{1,2}[\s.-]*[A-Za-z0-9]{0,3}[\s.-]*\d{4})\b",
         re.IGNORECASE,
     )
-    PLATE_REGEX = re.compile(r"\b([A-Za-z]{2}\s*\d{1,2}\s*[A-Za-z0-9]{1,3}\s*\d{4})\b", re.IGNORECASE)
+    PLATE_REGEX = re.compile(r"\b([A-Za-z]{2}[\s.-]*\d{1,2}[\s.-]*[A-Za-z0-9]{0,3}[\s.-]*\d{4})\b", re.IGNORECASE)
     HEADER_DATE_PATTERNS = [
         # Explicit date labels (Date, Dat, Datt, Dte, Pate, Dt) followed by date
         re.compile(
-            r"(?i)\b(?:date|dat|datt|dte|dt|pate)[\s.:-]*(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\b"
+            r"(?i)\b(?:date|dat|datt|dte|dt|pate)[\s.:-]*(\d{1,2})\s*[./-]\s*(\d{1,2})\s*[./-]\s*(\d{2,4})\b"
         ),
         # Labels without trailing word boundary (e.g. Dat24/01/2026, Date24/01/2026, Datt24/01/2026)
         re.compile(
-            r"(?i)(?:dat[et]*|dte|dt|pate)[\s.:-]*(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\b"
+            r"(?i)(?:dat[et]*|dte|dt|pate)[\s.:-]*(\d{1,2})\s*[./-]\s*(\d{1,2})\s*[./-]\s*(\d{2,4})\b"
         ),
         # 4-digit year date pattern without label in header lines
-        re.compile(r"\b(\d{1,2})[./-](\d{1,2})[./-](\d{4})\b"),
+        re.compile(r"\b(\d{1,2})\s*[./-]\s*(\d{1,2})\s*[./-]\s*(\d{4})\b"),
     ]
 
     # Line item regex matching: Sl No (optional), 10-digit invoice, customer, destination, weight, freight, eway bill
@@ -206,7 +206,7 @@ class ErodeDespatchExtractor:
 
     DEST_CITIES = [
         "NAVIMUMBAI", "NAVI MUMBAI", "GHAZIABAD", "KOLKATA", "MADURAI", "COIMBATORE",
-        "SALEM", "CHENNAI", "BANGALORE", "HYDERABAD", "MUMBAI",
+        "SALEM", "CHENNAI", "BANGALORE", "HYDERABAD", "MUMBAI", "NOIDA", "GURGAON", "FARIDABAD",
         "DELHI", "PONDICHERRY", "TRICHY", "TIRUPPUR", "SIVAKASI", "PUNE",
         "HUBLI", "KOVILPATTI", "POLLACHI", "CHENGALPATTU", "KARUR", "DINDIGUL", "ERODE", "TIRUNELVELI",
         "SURAT", "AHMEDABAD", "CUTTACK", "BHUBANESWAR", "NAGPUR", "INDORE", "JAIPUR", "KANPUR", "LUCKNOW",

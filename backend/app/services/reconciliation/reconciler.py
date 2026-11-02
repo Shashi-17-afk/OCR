@@ -320,6 +320,21 @@ class TirunelveliReconciliationEngine:
         else:
             status = ReconciliationStatus.CONFIRMED
 
+        inv_to_ewb = {}
+        for inv in canonical_invoices:
+            inv_no = None
+            if getattr(inv, "invoice_number", None):
+                inv_no = getattr(inv.invoice_number, "value", None) or getattr(inv.invoice_number, "raw_value", None)
+            if not inv_no and isinstance(getattr(inv, "invoice_number", None), str):
+                inv_no = inv.invoice_number
+            ewb_no = None
+            if getattr(inv, "eway_bill_number", None):
+                ewb_no = getattr(inv.eway_bill_number, "value", None) or getattr(inv.eway_bill_number, "raw_value", None)
+            if not ewb_no and isinstance(getattr(inv, "eway_bill_number", None), str):
+                ewb_no = inv.eway_bill_number
+            if inv_no and ewb_no:
+                inv_to_ewb[str(inv_no).strip()] = str(ewb_no).strip()
+
         return ConsignmentReconciliation(
             consignment_id=consignment.consignment_id,
             source_page=consignment.source_page,
@@ -335,6 +350,8 @@ class TirunelveliReconciliationEngine:
             bill_to_differs_from_delivery=bill_to_differs_deliv,
             compressed_invoices_cell=compressed_invoices,
             unique_invoices=unique_inv_numbers,
+            invoices=canonical_invoices,
+            eway_bill_map=inv_to_ewb,
             physical_invoice_pages_count=phys_pages_count,
             duplicate_invoice_pages_detected=has_duplicates,
             packages_summary=pkg_str,

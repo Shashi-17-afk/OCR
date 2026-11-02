@@ -64,6 +64,16 @@ class TMSExtractedField(BaseModel):
     data_type: TMSFieldDataType = Field(default=TMSFieldDataType.TEXT, description="Data type")
 
 
+class TMSInvoiceRecord(BaseModel):
+    """Represents a single invoice linked to an LR (consignment)."""
+    invoice_no: Optional[str] = Field(default=None, description="Invoice number")
+    invoice_value: Optional[float] = Field(default=None, description="Individual invoice value in Rs")
+    invoice_date: Optional[str] = Field(default=None, description="Individual invoice date (string)")
+    eway_bill: Optional[str] = Field(default=None, description="Explicitly verified E-Way Bill number")
+    source_page: Optional[int] = Field(default=None, description="Source document page where the invoice was extracted")
+    status: FieldStatus = Field(default=FieldStatus.NEEDS_REVIEW, description="Extraction status for this invoice")
+
+
 class TMSConsignmentItem(BaseModel):
     """Represents an individual LR / consignment row in Group Booking or child item in Direct Booking."""
     consignment_index: int = Field(ge=1, description="1-based index within the truck")
@@ -73,6 +83,11 @@ class TMSConsignmentItem(BaseModel):
     fields: dict[str, TMSExtractedField] = Field(
         default_factory=dict,
         description="Consignment-specific TMS fields mapped by clean_id",
+    )
+    # List of invoice records attached to this LR (multiple invoices/E-Way Bills per LR)
+    invoice_records: list[TMSInvoiceRecord] = Field(
+        default_factory=list,
+        description="Invoices linked to this LR (individual invoice_no, invoice_value, invoice_date, eway_bill, source_page, status)",
     )
 
 

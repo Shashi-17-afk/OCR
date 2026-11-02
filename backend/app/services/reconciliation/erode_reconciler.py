@@ -161,7 +161,8 @@ class ErodeReconciler:
             inv_pages = [despatch_sheet.page_number] if despatch_sheet else []
             ewb_pages = [despatch_sheet.page_number] if (despatch_sheet and ewbs) else []
 
-            inv_dt = link_res.booking_date if link_res.booking_date and link_res.booking_date != "UNKNOWN_DATE" else None
+            # Invoice Date: Never use booking date as fallback for invoice date
+            inv_dt = None
 
             reconciled_consignments.append(
                 ConsignmentReconciliation(
@@ -180,6 +181,8 @@ class ErodeReconciler:
                     bill_to_differs_from_delivery=bill_to_differs_from_delivery,
                     compressed_invoices_cell=compressed_invs,
                     unique_invoices=unique_invs,
+                    invoices=despatch_rows,
+                    eway_bill_map={r.invoice_no: r.eway_bill_no for r in despatch_rows if getattr(r, "invoice_no", None) and getattr(r, "eway_bill_no", None)},
                     physical_invoice_pages_count=len(despatch_rows),
                     duplicate_invoice_pages_detected=False,
                     invoice_pages=inv_pages,
@@ -219,6 +222,16 @@ class ErodeReconciler:
             truck_total_weight_kg = despatch_sheet.total_gross_weight_kg
         if despatch_sheet and despatch_sheet.total_bundles:
             truck_total_packages = despatch_sheet.total_bundles
+
+        # Check for package discrepancy between truck total bundles and consignment package sum
+        consign_pkgs_sum = sum(c.total_packages for c in reconciled_consignments)
+        if truck_total_packages > 0 and consign_pkgs_sum > 0 and truck_total_packages != consign_pkgs_sum:
+            pkg_diff = consign_pkgs_sum - truck_total_packages
+            if reconciled_consignments:
+                reconciled_consignments[0].audit_notes.append(
+                    f"Discrepancy: Direct Booking reports {truck_total_packages} packages vs Group Booking total of {consign_pkgs_sum} packages (diff: {pkg_diff:+d} packages)"
+                )
+                reconciled_consignments[0].status = ReconciliationStatus.REVIEW_REQUIRED_DISCREPANCY
 
         truck_total_weight_mt = round(truck_total_weight_kg / 1000.0, 3)
         truck_total_freight_rs = round(sum(c.freight_amount for c in reconciled_consignments if c.freight_amount is not None), 2)

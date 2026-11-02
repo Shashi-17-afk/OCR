@@ -200,6 +200,16 @@
     state.selectedFile = file;
     state.fileBlobUrl = URL.createObjectURL(file);
 
+    // Auto-detect loading point from filename signals if user hasn't explicitly locked it
+    const nameLower = (file.name || '').toLowerCase();
+    if (nameLower.includes('tirunelveli') || nameLower.includes('kunnamkulam') || nameLower.includes('bangalore') || nameLower.includes('sun') || nameLower.includes('ag.no') || nameLower.includes('sl.no')) {
+      state.loadingPoint = 'tirunelveli';
+      if (elements.loadingPointSelect) elements.loadingPointSelect.value = 'tirunelveli';
+    } else if (nameLower.includes('erode') || nameLower.includes('pallipalayam')) {
+      state.loadingPoint = 'erode';
+      if (elements.loadingPointSelect) elements.loadingPointSelect.value = 'erode';
+    }
+
     elements.dropzone.style.display = 'none';
     elements.selectedFileInfo.style.display = 'flex';
     elements.fileNameDisplay.textContent = file.name;
@@ -856,9 +866,35 @@
 
     dossiers.forEach((dossier, t_idx) => {
       const truckIndex = t_idx + 1;
-      const isErode = (dossier.loading_point || '').toLowerCase() === 'erode' || (sourceData.loading_point || '').toLowerCase() === 'erode';
-      const defaultShipper = isErode ? 'Seshasayee Paper and Boards Limited' : 'Sun Paper Mill';
-      const defaultLoading = isErode ? 'Pallipalayam / Erode' : 'Cheranmahadevi / Tirunelveli';
+
+      // Detect origin mill and loading point from document text, filename, and consignments
+      const allTextSignals = [
+        sourceData.original_filename || '',
+        dossier.loading_point || '',
+        sourceData.loading_point || '',
+        ...(dossier.reconciled_consignments || []).map((c) => `${c.delivery_place || ''} ${c.consignee || ''} ${c.packages_summary || ''}`),
+      ].join(' ').toLowerCase();
+
+      const isSunPaper = allTextSignals.includes('sun paper') || allTextSignals.includes('sun');
+      const isTirunelveli =
+        (dossier.loading_point || '').toLowerCase() === 'tirunelveli' ||
+        (sourceData.loading_point || '').toLowerCase() === 'tirunelveli' ||
+        allTextSignals.includes('tirunelveli') ||
+        allTextSignals.includes('cheranmahadevi') ||
+        allTextSignals.includes('kunnamkulam') ||
+        allTextSignals.includes('elanthaikulam') ||
+        allTextSignals.includes('mukkudal') ||
+        isSunPaper;
+
+      let defaultShipper = 'Seshasayee Paper and Boards Limited';
+      let defaultLoading = 'Cheranmahadevi / Tirunelveli';
+      if (isSunPaper) {
+        defaultShipper = 'Sun Paper Mill';
+        defaultLoading = 'Cheranmahadevi / Tirunelveli';
+      } else if (!isTirunelveli) {
+        defaultShipper = 'Seshasayee Paper and Boards Limited';
+        defaultLoading = 'Pallipalayam / Erode';
+      }
 
       const sourcePages = [];
       (dossier.reconciled_consignments || []).forEach((c) => {
@@ -867,6 +903,20 @@
         (c.eway_bill_pages || []).forEach((p) => { if (!sourcePages.includes(p)) sourcePages.push(p); });
       });
       sourcePages.sort((a, b) => a - b);
+
+      const uniqueDests = Array.from(new Set(
+        (dossier.reconciled_consignments || [])
+          .map((c) => c.delivery_place || c.consignee || c.bill_to)
+          .filter(Boolean)
+      ));
+      const destVal = uniqueDests.join(', ') || null;
+
+      const calcWt = (dossier.truck_total_weight_mt && dossier.truck_total_weight_mt > 0)
+        ? dossier.truck_total_weight_mt
+        : (dossier.reconciled_consignments || []).reduce((s, c) => s + (c.governing_weight_mt || 0), 0);
+      const calcPkgs = (dossier.truck_total_packages && dossier.truck_total_packages > 0)
+        ? dossier.truck_total_packages
+        : (dossier.reconciled_consignments || []).reduce((s, c) => s + (c.total_packages || 0), 0);
 
       const trip_fields = {
         license_plate: {
@@ -909,11 +959,21 @@
           is_mandatory: true,
           data_type: 'text',
         },
+        unloading_points: {
+          field_name: 'Consignee / Unloading Points *',
+          clean_id: 'unloading_points',
+          value: destVal,
+          status: destVal ? 'VERIFIED' : 'NOT_FOUND',
+          confidence: destVal ? 0.92 : 0.0,
+          source_page: sourcePages[0] || 1,
+          is_mandatory: true,
+          data_type: 'text',
+        },
         weight_mt: {
           field_name: 'Weight (MT) *',
           clean_id: 'weight_mt',
-          value: dossier.truck_total_weight_mt || 0.0,
-          status: (dossier.truck_total_weight_mt > 0) ? 'VERIFIED' : 'NOT_FOUND',
+          value: calcWt > 0 ? Number(calcWt.toFixed(3)) : null,
+          status: (calcWt > 0) ? 'VERIFIED' : 'NOT_FOUND',
           confidence: 0.96,
           source_page: sourcePages[0] || 1,
           is_mandatory: true,
@@ -922,8 +982,8 @@
         no_of_packages: {
           field_name: 'No Of Packages',
           clean_id: 'no_of_packages',
-          value: dossier.truck_total_packages || 0,
-          status: (dossier.truck_total_packages > 0) ? 'VERIFIED' : 'NOT_FOUND',
+          value: calcPkgs > 0 ? calcPkgs : null,
+          status: (calcPkgs > 0) ? 'VERIFIED' : 'NOT_FOUND',
           confidence: 0.95,
           source_page: sourcePages[0] || 1,
           is_mandatory: false,
@@ -1031,6 +1091,54 @@
       const consignments = (dossier.reconciled_consignments || []).map((rc, c_idx) => {
         const letter = String.fromCharCode(65 + (c_idx % 26));
         const c_code = `${truckIndex}${letter}`;
+
+        const invRecords = [];
+        const ewbMap = rc.eway_bill_map || {};
+
+        if (Array.isArray(rc.invoices) && rc.invoices.length > 0) {
+          rc.invoices.forEach((inv) => {
+            const invNo = inv.invoice_number?.value || inv.invoice_no || inv.invoice_number || null;
+            let invVal = null;
+            if (inv.net_claim_rs?.value != null) invVal = Number(inv.net_claim_rs.value);
+            else if (inv.amount != null) invVal = Number(inv.amount);
+            else if (inv.invoice_value != null) invVal = Number(inv.invoice_value);
+
+            let invDt = null;
+            if (inv.invoice_date?.value && inv.invoice_date.value !== 'UNKNOWN_DATE') invDt = String(inv.invoice_date.value);
+            else if (inv.date && inv.date !== 'UNKNOWN_DATE') invDt = String(inv.date);
+            else if (inv.invoice_date && inv.invoice_date !== 'UNKNOWN_DATE') invDt = String(inv.invoice_date);
+
+            const ewb = ewbMap[invNo] || inv.eway_bill_number?.value || inv.eway_bill_no || null;
+            const srcP = inv.source_page || inv.invoice_number?.source_page || rc.source_page || 1;
+            const isVer = Boolean(invNo && invVal != null && invDt && ewb);
+
+            invRecords.push({
+              invoice_no: invNo,
+              invoice_value: invVal != null ? Number(invVal.toFixed(2)) : null,
+              invoice_date: invDt,
+              eway_bill: ewb,
+              source_page: srcP,
+              status: isVer ? 'VERIFIED' : (invNo ? 'NEEDS_REVIEW' : 'NOT_FOUND'),
+            });
+          });
+        } else if (Array.isArray(rc.unique_invoices) && rc.unique_invoices.length > 0) {
+          rc.unique_invoices.forEach((invNo) => {
+            const ewb = ewbMap[invNo] || null;
+            invRecords.push({
+              invoice_no: invNo,
+              invoice_value: null,
+              invoice_date: (rc.invoice_date && rc.invoice_date !== 'UNKNOWN_DATE') ? rc.invoice_date : null,
+              eway_bill: ewb,
+              source_page: (rc.invoice_pages && rc.invoice_pages[0]) || rc.source_page || 1,
+              status: 'NEEDS_REVIEW',
+            });
+          });
+        } else if (Array.isArray(rc.invoice_records) && rc.invoice_records.length > 0) {
+          invRecords.push(...rc.invoice_records);
+        }
+
+        const c_dest = rc.delivery_place || rc.consignee || rc.bill_to || null;
+
         return {
           consignment_index: c_idx + 1,
           consignment_code: c_code,
@@ -1039,8 +1147,10 @@
           fields: {
             consignment_code: { field_name: 'Consignment (1A, 1B, ...)', clean_id: 'consignment_code', value: c_code, status: 'VERIFIED', is_mandatory: false, data_type: 'text' },
             party_dropdown: { field_name: 'Party (2nd dropdown, e.g. Third Party)', clean_id: 'party_dropdown', value: rc.consignee || rc.bill_to || null, status: 'VERIFIED', is_mandatory: false, data_type: 'text' },
+            unloading_points: { field_name: 'Consignee / Unloading Points *', clean_id: 'unloading_points', value: c_dest, status: c_dest ? 'VERIFIED' : 'NOT_FOUND', is_mandatory: true, data_type: 'text' },
             no_of_packs: { field_name: 'No. Of Packs', clean_id: 'no_of_packs', value: rc.total_packages || 0, status: 'VERIFIED', is_mandatory: false, data_type: 'number' },
             weight: { field_name: 'Weight', clean_id: 'weight', value: rc.governing_weight_mt || 0.0, status: 'VERIFIED', is_mandatory: false, data_type: 'number' },
+            handwritten_weight_kg: { field_name: 'Handwritten LR Weight (kg)', clean_id: 'handwritten_weight_kg', value: rc.lr_crosscheck_weight_kg || null, status: rc.lr_crosscheck_weight_kg ? 'VERIFIED' : 'NOT_FOUND', is_mandatory: false, data_type: 'number' },
             unit: { field_name: 'Unit', clean_id: 'unit', value: 'MT', status: 'VERIFIED', is_mandatory: false, data_type: 'text' },
             lr_number: { field_name: 'LR Number', clean_id: 'lr_number', value: rc.lr_number_raw || null, status: 'VERIFIED', is_mandatory: false, data_type: 'text' },
             eway_bill: { field_name: 'Eway Bill', clean_id: 'eway_bill', value: rc.eway_bills_cell || null, status: rc.eway_bills_cell ? 'VERIFIED' : 'NOT_FOUND', is_mandatory: false, data_type: 'text' },
@@ -1048,8 +1158,10 @@
             description_cargo_type: { field_name: 'Description (cargo type)', clean_id: 'description_cargo_type', value: rc.packages_summary || 'Paper Reels / Bundles', status: 'VERIFIED', is_mandatory: false, data_type: 'text' },
             invoice_no: { field_name: 'Invoice No', clean_id: 'invoice_no', value: rc.compressed_invoices_cell || null, status: rc.compressed_invoices_cell ? 'VERIFIED' : 'NOT_FOUND', is_mandatory: false, data_type: 'text' },
             invoice_value: { field_name: 'Invoice Value', clean_id: 'invoice_value', value: rc.total_value_rs || 0.0, status: rc.total_value_rs > 0 ? 'VERIFIED' : 'NOT_FOUND', is_mandatory: false, data_type: 'number' },
+            invoice_date: { field_name: 'Invoice Date', clean_id: 'invoice_date', value: (rc.invoice_date && rc.invoice_date !== 'UNKNOWN_DATE') ? rc.invoice_date : null, status: (rc.invoice_date && rc.invoice_date !== 'UNKNOWN_DATE') ? 'VERIFIED' : 'NOT_FOUND', is_mandatory: false, data_type: 'date' },
             freight_charges: { field_name: 'Freight Charges', clean_id: 'freight_charges', value: rc.freight_amount || 0.0, status: rc.freight_amount > 0 ? 'VERIFIED' : 'NEEDS_REVIEW', is_mandatory: false, data_type: 'number' },
           },
+          invoice_records: invRecords,
         };
       });
 
@@ -1065,12 +1177,12 @@
         truck_number: dossier.truck_number || `TRUCK-${truckIndex}`,
         booking_date: dossier.booking_date || '2026-01-24',
         booking_type: dossier.booking_type || 'group',
-        loading_point: dossier.loading_point || 'erode',
+        loading_point: dossier.loading_point || (isTirunelveli ? 'tirunelveli' : 'erode'),
         source_pages: sourcePages,
         trip_fields: trip_fields,
         consignments: consignments,
-        total_gross_weight_mt: dossier.truck_total_weight_mt || 0.0,
-        total_packages: dossier.truck_total_packages || 0,
+        total_gross_weight_mt: calcWt > 0 ? Number(calcWt.toFixed(3)) : 0.0,
+        total_packages: calcPkgs,
         total_freight_rs: dossier.truck_total_freight_rs || 0.0,
         total_value_rs: dossier.truck_total_value_rs || 0.0,
         missing_mandatory_fields: missing_mandatory,

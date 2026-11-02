@@ -12,27 +12,27 @@ class ErodeLRSheetExtractor:
     """Extracts handwritten consignment rows, party names, invoice links, and totals from Erode LR sheets."""
 
     TRUCK_REGEX = re.compile(
-        r"(?:truck\s*(?:no|number)|lorry\s*(?:no|number)|vehicle\s*no)[\s:]*([A-Za-z]{2}\s*\d{1,2}\s*[A-Za-z]{1,3}\s*\d{4})\b",
+        r"(?:truck\s*(?:no|number)|lorry\s*(?:no|number)|vehicle\s*no)[\s.:-]*([A-Za-z]{2}[\s.-]*\d{1,2}[\s.-]*[A-Za-z0-9]{0,3}[\s.-]*\d{4})\b",
         re.IGNORECASE,
     )
-    PLATE_REGEX = re.compile(r"\b([A-Za-z]{2}\s*\d{1,2}\s*[A-Za-z]{1,3}\s*\d{4})\b", re.IGNORECASE)
+    PLATE_REGEX = re.compile(r"\b([A-Za-z]{2}[\s.-]*\d{1,2}[\s.-]*[A-Za-z0-9]{0,3}[\s.-]*\d{4})\b", re.IGNORECASE)
     HEADER_DATE_PATTERNS = [
         re.compile(
-            r"(?i)\b(?:date|dat|datt|dte|dt|pate)[\s.:-]*(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\b"
+            r"(?i)\b(?:date|dat|datt|dte|dt|pate)[\s.:-]*(\d{1,2})\s*[./-]\s*(\d{1,2})\s*[./-]\s*(\d{2,4})\b"
         ),
         re.compile(
-            r"(?i)(?:dat[et]*|dte|dt|pate)[\s.:-]*(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\b"
+            r"(?i)(?:dat[et]*|dte|dt|pate)[\s.:-]*(\d{1,2})\s*[./-]\s*(\d{1,2})\s*[./-]\s*(\d{2,4})\b"
         ),
-        re.compile(r"\b(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\b"),
+        re.compile(r"\b(\d{1,2})\s*[./-]\s*(\d{1,2})\s*[./-]\s*(\d{2,4})\b"),
     ]
     DEST_REGEX = re.compile(
-        r"\bdestination[\s:]*([A-Za-z]+(?:\s+[A-Za-z]+)*?)(?=\s+date|\s*$|\n)",
+        r"\b(?:destination|dest|to|place)[\s.:-]*([A-Za-z]+(?:\s+[A-Za-z]+)*?)(?=\s+date|\s*$|\n)",
         re.IGNORECASE,
     )
 
     DEST_CITIES = [
         "NAVIMUMBAI", "NAVI MUMBAI", "GHAZIABAD", "KOLKATA", "MADURAI", "COIMBATORE",
-        "SALEM", "CHENNAI", "BANGALORE", "HYDERABAD", "MUMBAI",
+        "SALEM", "CHENNAI", "BANGALORE", "HYDERABAD", "MUMBAI", "NOIDA", "GURGAON", "FARIDABAD",
         "DELHI", "PONDICHERRY", "TRICHY", "TIRUPPUR", "SIVAKASI", "PUNE",
         "HUBLI", "KOVILPATTI", "POLLACHI", "CHENGALPATTU", "KARUR", "DINDIGUL",
         "SURAT", "AHMEDABAD", "CUTTACK", "BHUBANESWAR", "NAGPUR", "INDORE", "JAIPUR", "KANPUR", "LUCKNOW",
@@ -134,7 +134,7 @@ class ErodeLRSheetExtractor:
     def _extract_date(cls, text: str) -> Optional[str]:
         """Extracts and validates booking date from LR sheet header, normalized to ISO YYYY-MM-DD."""
         lines = [l.strip() for l in text.splitlines() if l.strip()]
-        header_lines = lines[:10]
+        header_lines = lines[:25]
         header_text = "\n".join(header_lines)
 
         for pattern in cls.HEADER_DATE_PATTERNS:

@@ -69,7 +69,7 @@ class ErodeDespatchSheet(BaseModel):
     total_net_weight_kg: Optional[float] = Field(default=None, description="Total net weight (NetWt)")
     total_gross_weight_kg: Optional[float] = Field(default=None, description="Total gross weight (GrossWt)")
     no_of_invoices: Optional[int] = Field(default=None, description="No of Inv stated in totals")
-    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
 
 
 class ErodeLRRow(BaseModel):
@@ -96,12 +96,16 @@ class ErodeLRRow(BaseModel):
         description="Handwritten weight in kg written in the LR row",
     )
     freight_text: Optional[str] = Field(default=None, description="Freight annotation or note")
-    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     lr_crop_base64: Optional[str] = Field(
         default=None,
         description="Base64 PNG image crop of handwritten LR number for manual human review (FR4)",
     )
     bbox: Optional[list[float]] = Field(default=None, description="Row bounding box [x1, y1, x2, y2]")
+    raw_lr_text: Optional[str] = Field(default=None, description="Raw OCR token string before normalization")
+    source_page: Optional[int] = Field(default=None, description="Source page number where LR was extracted")
+    needs_review: bool = Field(default=False, description="Flagged for manual review if LR number or values uncertain")
+    review_reason: Optional[str] = Field(default=None, description="Detailed reason if flagged for review")
 
 
 class ErodeLRSheet(BaseModel):
@@ -119,7 +123,7 @@ class ErodeLRSheet(BaseModel):
     rows: list[ErodeLRRow] = Field(default_factory=list, description="LR line items")
     total_packages: Optional[int] = Field(default=None, description="Footer total packages")
     total_weight_kg: Optional[float] = Field(default=None, description="Footer total weight in kg")
-    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
 
 
 class ErodePageExtraction(BaseModel):

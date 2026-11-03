@@ -86,15 +86,17 @@ class ErodeLinker:
         lr_sheet: Optional[ErodeLRSheet],
         despatch_sheet: Optional[ErodeDespatchSheet],
         booking_type: Optional[BookingType] = None,
+        booking_date: Optional[str] = None,
     ) -> ErodeLinkResult:
         truck_number = (
             (despatch_sheet and despatch_sheet.truck_number)
             or (lr_sheet and lr_sheet.truck_number)
             or "UNKNOWN_TRUCK"
         )
-        booking_date = (
-            (despatch_sheet and despatch_sheet.date)
-            or (lr_sheet and lr_sheet.date)
+        effective_booking_date = (
+            booking_date
+            or (despatch_sheet and despatch_sheet.date and despatch_sheet.date != "UNKNOWN_DATE" and despatch_sheet.date)
+            or (lr_sheet and lr_sheet.date and lr_sheet.date != "UNKNOWN_DATE" and lr_sheet.date)
             or "UNKNOWN_DATE"
         )
 
@@ -219,67 +221,28 @@ class ErodeLinker:
                             )
                         )
 
-        # Stage C: Unclaimed Despatch rows in Group booking (grouped per Customer)
+        # Stage C: Unclaimed Despatch rows in Group booking
         unassigned_despatch: list[ErodeDespatchRow] = []
         if despatch_sheet:
             for d_row in despatch_sheet.rows:
                 if d_row.invoice_no not in claimed_invoices:
                     unassigned_despatch.append(d_row)
 
-        if unassigned_despatch:
-            # Available real LR numbers from the LR sheet
-            available_lrs = [r.lr_number for r in lr_sheet.rows if r.lr_number and not r.lr_number.startswith("LR-")] if lr_sheet else []
-            used_lrs = set(c.lr_row.lr_number for c in consignments)
-            base_num = int(available_lrs[0]) if available_lrs else 29687
-            lr_idx = 0
-
-            # Group unassigned invoices by customer root preserving order
-            despatch_by_cust: dict[str, list[ErodeDespatchRow]] = {}
+        # Multi-invoice LR grouping: Link unassigned invoices sharing customer root to existing consignment
+        if unassigned_despatch and consignments:
+            still_unassigned: list[ErodeDespatchRow] = []
             for d_row in unassigned_despatch:
-                root = extract_customer_root(d_row.customer_name)
-                despatch_by_cust.setdefault(root, []).append(d_row)
-
-            unit_str = getattr(despatch_sheet, "package_unit", "bundles") if despatch_sheet else "bundles"
-            tot_bnd = despatch_sheet.total_bundles if despatch_sheet else None
-            tot_wt = despatch_sheet.total_gross_weight_kg if despatch_sheet else None
-
-            for root, d_rows in despatch_by_cust.items():
-                while lr_idx < len(available_lrs) and available_lrs[lr_idx] in used_lrs:
-                    lr_idx += 1
-
-                if lr_idx < len(available_lrs):
-                    lr_no = available_lrs[lr_idx]
-                    lr_idx += 1
-                else:
-                    lr_no = str(base_num + len(used_lrs))
-                used_lrs.add(lr_no)
-
-                c_wt = sum(r.handwritten_weight_kg for r in d_rows if r.handwritten_weight_kg) or None
-                if c_wt and tot_bnd and tot_wt and tot_wt > 0:
-                    c_pkg = max(1, round(tot_bnd * (c_wt / tot_wt)))
-                else:
-                    c_pkg = len(d_rows)
-
-                gen_lr = ErodeLRRow(
-                    lr_number=lr_no,
-                    party_name=d_rows[0].customer_name,
-                    delivery_to=d_rows[0].destination,
-                    raw_invoice_text=", ".join(r.invoice_no for r in d_rows),
-                    invoices=[r.invoice_no for r in d_rows],
-                    packages_str=f"{c_pkg} {unit_str}",
-                    package_count=c_pkg,
-                    package_type=unit_str,
-                    weight_kg=c_wt,
+                d_root = extract_customer_root(d_row.customer_name)
+                matched_c = next(
+                    (c for c in consignments if extract_customer_root(c.lr_row.party_name) == d_root),
+                    None,
                 )
-                consignments.append(
-                    LinkedErodeConsignment(
-                        lr_row=gen_lr,
-                        linked_despatch_rows=d_rows,
-                        unmatched_invoices=[],
-                    )
-                )
-
-            unassigned_despatch = []
+                if matched_c:
+                    matched_c.linked_despatch_rows.append(d_row)
+                    claimed_invoices.add(d_row.invoice_no)
+                else:
+                    still_unassigned.append(d_row)
+            unassigned_despatch = still_unassigned
 
         # Final pass: Ensure every consignment has clean official customer name, weight, and packages
         unit_str = getattr(despatch_sheet, "package_unit", "bundles") if despatch_sheet else "bundles"
@@ -310,7 +273,7 @@ class ErodeLinker:
 
         return ErodeLinkResult(
             truck_number=truck_number,
-            booking_date=booking_date,
+            booking_date=effective_booking_date,
             consignments=consignments,
             unassigned_despatch_invoices=unassigned_despatch,
             link_warnings=warnings,
@@ -402,11 +365,15 @@ class ErodeBatchPartitioner:
 
                 current_lr_sheets = []
                 current_page_nums = []
-            else:
+            elif p.classification == PageClassificationType.LORRY_RECEIPT or p.lr_sheet:
                 # LR sheet or continuation sheet
                 current_page_nums.append(p.page_number)
                 if p.lr_sheet:
                     current_lr_sheets.append(p.lr_sheet)
+            else:
+                # Only include unknown pages if they carry extracted data
+                if p.lr_sheet or p.despatch:
+                    current_page_nums.append(p.page_number)
 
         # Handle remaining LR sheets at the end of the document if no concluding Despatch sheet
         if current_lr_sheets:
@@ -469,8 +436,88 @@ class ErodeBatchPartitioner:
             else:
                 consolidated_bundles.append(b)
 
+        # Resolve orphaned UNKNOWN_TRUCK bundles by matching invoices, customer names, or weights/packages
+        known_trucks = [eb for eb in consolidated_bundles if eb.truck_number != "UNKNOWN_TRUCK"]
+        resolved_unknown_indices: set[int] = set()
+
+        for u_idx, b in enumerate(consolidated_bundles):
+            if b.truck_number != "UNKNOWN_TRUCK":
+                continue
+
+            has_despatch_rows = bool(b.despatch_sheet and b.despatch_sheet.rows)
+            has_lr_rows = any(bool(s.rows) for s in b.lr_sheets)
+            has_weight = bool((b.despatch_sheet and b.despatch_sheet.total_gross_weight_kg) or any(s.total_weight_kg for s in b.lr_sheets))
+            has_packs = bool((b.despatch_sheet and b.despatch_sheet.total_bundles) or any(s.total_packages for s in b.lr_sheets))
+
+            # Discard empty ghost bundles with no rows, weight, or packages
+            if not has_despatch_rows and not has_lr_rows and not has_weight and not has_packs:
+                resolved_unknown_indices.add(u_idx)
+                continue
+
+            target_truck: Optional[ErodeTruckBundle] = None
+            u_weight = (
+                (b.despatch_sheet and b.despatch_sheet.total_gross_weight_kg)
+                or next((s.total_weight_kg for s in b.lr_sheets if s.total_weight_kg), None)
+            )
+            u_packs = (
+                (b.despatch_sheet and b.despatch_sheet.total_bundles)
+                or next((s.total_packages for s in b.lr_sheets if s.total_packages), None)
+            )
+
+            # 1. Match by invoice numbers
+            u_invs: set[str] = set()
+            if b.despatch_sheet:
+                u_invs.update(r.invoice_no for r in b.despatch_sheet.rows if r.invoice_no)
+            for s in b.lr_sheets:
+                for r in s.rows:
+                    u_invs.update(r.invoices)
+
+            if u_invs:
+                for kt in known_trucks:
+                    kt_invs = set(r.invoice_no for r in kt.despatch_sheet.rows if r.invoice_no) if kt.despatch_sheet else set()
+                    if u_invs.intersection(kt_invs):
+                        target_truck = kt
+                        break
+
+            # 2. Match by customer name overlap
+            if not target_truck:
+                u_custs: set[str] = set()
+                if b.despatch_sheet:
+                    u_custs.update(extract_customer_root(r.customer_name) for r in b.despatch_sheet.rows if r.customer_name)
+                for s in b.lr_sheets:
+                    u_custs.update(extract_customer_root(r.party_name) for r in s.rows if r.party_name)
+
+                if u_custs:
+                    for kt in known_trucks:
+                        kt_custs = set(extract_customer_root(r.customer_name) for r in kt.despatch_sheet.rows if r.customer_name) if kt.despatch_sheet else set()
+                        if u_custs.intersection(kt_custs):
+                            target_truck = kt
+                            break
+
+            # 3. Match by gross weight (within 5 kg) or package totals if candidate truck lacks an LR sheet
+            if not target_truck and (u_weight or u_packs):
+                cand_trucks = [kt for kt in known_trucks if not kt.lr_sheets]
+                for kt in cand_trucks:
+                    kt_wt = kt.despatch_sheet.total_gross_weight_kg if kt.despatch_sheet else None
+                    kt_pk = kt.despatch_sheet.total_bundles if kt.despatch_sheet else None
+                    if u_weight and kt_wt and abs(u_weight - kt_wt) <= 5.0:
+                        target_truck = kt
+                        break
+                    if u_packs and kt_pk and u_packs == kt_pk:
+                        target_truck = kt
+                        break
+
+            if target_truck:
+                target_truck.lr_sheets.extend(b.lr_sheets)
+                target_truck.page_numbers.extend(b.page_numbers)
+                if not target_truck.despatch_sheet and b.despatch_sheet:
+                    target_truck.despatch_sheet = b.despatch_sheet
+                resolved_unknown_indices.add(u_idx)
+
+        final_bundles = [b for idx, b in enumerate(consolidated_bundles) if idx not in resolved_unknown_indices]
+
         # Reconcile booking dates against authoritative consensus batch booking date
-        for b in consolidated_bundles:
+        for b in final_bundles:
             if (not b.booking_date or b.booking_date == "UNKNOWN_DATE") and batch_booking_date:
                 b.booking_date = batch_booking_date
             elif b.booking_date and batch_booking_date and b.booking_date != batch_booking_date:
@@ -485,5 +532,9 @@ class ErodeBatchPartitioner:
                                 b.booking_date = batch_booking_date
                 except Exception:
                     pass
+            # Propagate booking date to child LR sheets so individual consignment records inherit it
+            for s in b.lr_sheets:
+                if not s.date or s.date == "UNKNOWN_DATE":
+                    s.date = b.booking_date
 
-        return consolidated_bundles
+        return final_bundles

@@ -12,7 +12,7 @@ from backend.app.schemas.reconciliation import (
     ReconciliationStatus,
     TruckReconciliationDossier,
 )
-from backend.app.services.grouping.erode_linker import ErodeLinkResult, ErodeLinker
+from backend.app.services.grouping.erode_linker import ErodeLinkResult, ErodeLinker, extract_customer_root
 from backend.app.services.reconciliation.range_compressor import InvoiceRangeCompressor
 
 
@@ -25,12 +25,14 @@ class ErodeReconciler:
         lr_sheet: Optional[ErodeLRSheet],
         despatch_sheet: Optional[ErodeDespatchSheet],
         booking_type: BookingType,
+        booking_date: Optional[str] = None,
     ) -> TruckReconciliationDossier:
         # 1. Link Despatch invoices to LR rows
         link_res: ErodeLinkResult = ErodeLinker.link(
             lr_sheet=lr_sheet,
             despatch_sheet=despatch_sheet,
             booking_type=booking_type,
+            booking_date=booking_date,
         )
 
         reconciled_consignments: list[ConsignmentReconciliation] = []
@@ -157,7 +159,7 @@ class ErodeReconciler:
             if bill_to_differs_from_delivery or not weight_matches or item.unmatched_invoices:
                 status = ReconciliationStatus.REVIEW_REQUIRED_DISCREPANCY
 
-            src_page = lr_sheet.page_number if lr_sheet else (despatch_sheet.page_number if despatch_sheet else 1)
+            src_page = getattr(lr, "source_page", None) or (lr_sheet.page_number if lr_sheet else (despatch_sheet.page_number if despatch_sheet else 1))
             inv_pages = [despatch_sheet.page_number] if despatch_sheet else []
             ewb_pages = [despatch_sheet.page_number] if (despatch_sheet and ewbs) else []
 
@@ -204,6 +206,66 @@ class ErodeReconciler:
                     lr_crop_base64=lr.lr_crop_base64,
                 )
             )
+
+        # Unassigned Despatch Invoices: Never fabricate fake LR numbers.
+        # Group remaining unlinked invoices per customer root and record as MISSING_LR requiring review
+        if link_res.unassigned_despatch_invoices:
+            unassigned_by_cust: dict[str, list] = {}
+            for d in link_res.unassigned_despatch_invoices:
+                root = extract_customer_root(d.customer_name)
+                unassigned_by_cust.setdefault(root, []).append(d)
+
+            for root, d_rows in unassigned_by_cust.items():
+                c_wt = round(sum(r.handwritten_weight_kg or 0.0 for r in d_rows), 2)
+                c_mt = round(c_wt / 1000.0, 3)
+                consignee = d_rows[0].customer_name
+                dest = d_rows[0].destination
+                all_invs = [r.invoice_no for r in d_rows]
+                compressed_invs = InvoiceRangeCompressor.compress(all_invs)
+                truck_total_weight_kg += c_wt
+                audit_notes = [
+                    f"Despatch invoice(s) {compressed_invs} for '{consignee}' not claimed by any handwritten LR; manual review required (PRD §5.1, §6)."
+                ]
+                reconciled_consignments.append(
+                    ConsignmentReconciliation(
+                        consignment_id=f"ERODE_{link_res.truck_number}_UNASSIGNED_{root}",
+                        source_page=despatch_sheet.page_number if despatch_sheet else 1,
+                        lr_number_raw="MISSING_LR",
+                        lr_number_normalized="MISSING_LR",
+                        truck_number=link_res.truck_number,
+                        booking_date=link_res.booking_date,
+                        invoice_date=None,
+                        delivery_place=dest,
+                        consignee=consignee,
+                        ship_to=dest,
+                        bill_to=consignee,
+                        bill_to_differs_from_ship_to=False,
+                        bill_to_differs_from_delivery=False,
+                        compressed_invoices_cell=compressed_invs,
+                        unique_invoices=all_invs,
+                        invoices=d_rows,
+                        eway_bill_map={r.invoice_no: r.eway_bill_no for r in d_rows if getattr(r, "invoice_no", None) and getattr(r, "eway_bill_no", None)},
+                        physical_invoice_pages_count=len(d_rows),
+                        duplicate_invoice_pages_detected=False,
+                        invoice_pages=[despatch_sheet.page_number] if despatch_sheet else [],
+                        eway_bill_pages=[despatch_sheet.page_number] if (despatch_sheet and any(r.eway_bill_no for r in d_rows)) else [],
+                        packages_summary="Unspecified",
+                        total_packages=0,
+                        governing_weight_kg=c_wt,
+                        governing_weight_mt=c_mt,
+                        lr_crosscheck_weight_kg=None,
+                        weight_matches_lr=False,
+                        freight_amount=round(sum(r.freight_amount for r in d_rows if r.freight_amount is not None), 2) if any(r.freight_amount is not None for r in d_rows) else None,
+                        is_party_freight=False,
+                        is_split_freight=False,
+                        total_value_rs=0.0,
+                        eway_bills_cell=", ".join(dict.fromkeys(r.eway_bill_no for r in d_rows if r.eway_bill_no)),
+                        eway_expiry_cell=None,
+                        status=ReconciliationStatus.REVIEW_REQUIRED_DISCREPANCY,
+                        audit_notes=audit_notes,
+                        lr_crop_base64=None,
+                    )
+                )
 
         # Direct booking override: if 1 consignment and despatch total gross weight exists, tie to it
         if len(reconciled_consignments) == 1 and despatch_sheet and despatch_sheet.total_gross_weight_kg:
@@ -309,4 +371,5 @@ class ErodeReconciler:
             lr_sheet=combined_lr_sheet,
             despatch_sheet=bundle.despatch_sheet,
             booking_type=bundle.booking_type,
+            booking_date=bundle.booking_date,
         )

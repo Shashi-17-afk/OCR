@@ -10,10 +10,13 @@ class ErodeDespatchExtractor:
     """Extracts structured invoice lines, weights, freights, and e-way bills from Erode Despatch Details sheets."""
 
     TRUCK_REGEX = re.compile(
-        r"(?:lorry\s*(?:number|no)|truck\s*(?:number|no)|vehicle\s*no)[\s.:-]*([A-Za-z]{2}[\s.-]*\d{1,2}[\s.-]*[A-Za-z0-9]{0,3}[\s.-]*\d{4})\b",
+        r"(?:lorry\s*(?:number|no)|truck\s*(?:number|no)|vehicle\s*no)[\s.:-]*([A-Za-z]{2}[\s.-]*\d{1,2}[\s.-]*[A-Za-z0-9]{0,3}[\s.-]*(?:\d\s*){4})\b",
         re.IGNORECASE,
     )
-    PLATE_REGEX = re.compile(r"\b([A-Za-z]{2}[\s.-]*\d{1,2}[\s.-]*[A-Za-z0-9]{0,3}[\s.-]*\d{4})\b", re.IGNORECASE)
+    PLATE_REGEX = re.compile(
+        r"\b([A-Za-z]{2}[\s.-]*\d{1,2}[\s.-]*[A-Za-z0-9]{0,3}[\s.-]*(?:\d\s*){4})\b",
+        re.IGNORECASE,
+    )
     HEADER_DATE_PATTERNS = [
         # Explicit date labels (Date, Dat, Datt, Dte, Pate, Dt) followed by date
         re.compile(
@@ -75,8 +78,10 @@ class ErodeDespatchExtractor:
                 frt_rows = [r for r in rows if r.freight_amount and r.freight_amount > 0]
                 tot_frt = sum(r.freight_amount for r in frt_rows)
 
-                # Case A: Every row has non-zero freight -> direct governing gross weight allocation
-                if len(frt_rows) == len(rows) and tot_frt > 0:
+                valid_extracted = [r.handwritten_weight_kg for r in rows if r.handwritten_weight_kg is not None]
+                if len(valid_extracted) == len(rows) and abs(sum(valid_extracted) - gross_wt) <= 1.0:
+                    pass  # Extracted row weights already match gross weight exactly; do not overwrite with freight estimates
+                elif len(frt_rows) == len(rows) and tot_frt > 0:
                     rate = tot_frt / gross_wt
                     for r in rows:
                         r.handwritten_weight_kg = round(r.freight_amount / rate, 1)
@@ -161,6 +166,14 @@ class ErodeDespatchExtractor:
         plate_match = cls.PLATE_REGEX.search(text)
         if plate_match:
             return re.sub(r"\s+", "", plate_match.group(1)).upper()
+        # Search window in first 15 lines if label is on separate line from vehicle plate
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        for i, line in enumerate(lines[:15]):
+            if re.search(r"\b(?:truck|lorry|vehicle)\b", line, re.I):
+                window = " ".join(lines[max(0, i - 1):min(len(lines), i + 3)])
+                m_win = cls.PLATE_REGEX.search(window)
+                if m_win:
+                    return re.sub(r"\s+", "", m_win.group(1)).upper()
         return None
 
     @classmethod

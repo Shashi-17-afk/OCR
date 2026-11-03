@@ -12,18 +12,21 @@ class ErodeLRSheetExtractor:
     """Extracts handwritten consignment rows, party names, invoice links, and totals from Erode LR sheets."""
 
     TRUCK_REGEX = re.compile(
-        r"(?:truck\s*(?:no|number)|lorry\s*(?:no|number)|vehicle\s*no)[\s.:-]*([A-Za-z]{2}[\s.-]*\d{1,2}[\s.-]*[A-Za-z0-9]{0,3}[\s.-]*\d{4})\b",
+        r"(?:truck\s*(?:no|number)|lorry\s*(?:no|number)|vehicle\s*no)[\s.:-]*([A-Za-z]{2}[\s.-]*\d{1,2}[\s.-]*[A-Za-z0-9]{0,3}[\s.-]*(?:\d\s*){4})\b",
         re.IGNORECASE,
     )
-    PLATE_REGEX = re.compile(r"\b([A-Za-z]{2}[\s.-]*\d{1,2}[\s.-]*[A-Za-z0-9]{0,3}[\s.-]*\d{4})\b", re.IGNORECASE)
+    PLATE_REGEX = re.compile(
+        r"\b([A-Za-z]{2}[\s.-]*\d{1,2}[\s.-]*[A-Za-z0-9]{0,3}[\s.-]*(?:\d\s*){4})\b",
+        re.IGNORECASE,
+    )
     HEADER_DATE_PATTERNS = [
         re.compile(
-            r"(?i)\b(?:date|dat|datt|dte|dt|pate)[\s.:-]*(\d{1,2})\s*[./-]\s*(\d{1,2})\s*[./-]\s*(\d{2,4})\b"
+            r"(?i)\b(?:date|dat|datt|dte|dt|pate)[\s.:-]*(\d{1,2})\s*[./\-(]\s*(\d{1,2})\s*[./\-(]?\s*(\d{2,4})\b"
         ),
         re.compile(
-            r"(?i)(?:dat[et]*|dte|dt|pate)[\s.:-]*(\d{1,2})\s*[./-]\s*(\d{1,2})\s*[./-]\s*(\d{2,4})\b"
+            r"(?i)(?:dat[et]*|dte|dt|pate)[\s.:-]*(\d{1,2})\s*[./\-(]\s*(\d{1,2})\s*[./\-(]?\s*(\d{2,4})\b"
         ),
-        re.compile(r"\b(\d{1,2})\s*[./-]\s*(\d{1,2})\s*[./-]\s*(\d{2,4})\b"),
+        re.compile(r"\b(\d{1,2})\s*[./\-(]\s*(\d{1,2})\s*[./\-(]?\s*(\d{2,4})\b"),
     ]
     DEST_REGEX = re.compile(
         r"\b(?:destination|dest|to|place)[\s.:-]*([A-Za-z]+(?:\s+[A-Za-z]+)*?)(?=\s+date|\s*$|\n)",
@@ -47,7 +50,7 @@ class ErodeLRSheetExtractor:
 
     # LR Line item matching
     LR_START_REGEX = re.compile(
-        r"(?:^|[^\d])(?P<lr>(?:2|3|0|8|9|4|7)[/\s]?[98]\s*[\dOo]\s*[\dOo]\s*[\dOo\)])(?:\b|(?<=\)))",
+        r"^\s*(?:lr\.?\s*(?:no\.?)?\s*)?(?P<lr>[0-9][0-9bOoIl\s/]{3,6})(?=[^\d]|$)",
         re.IGNORECASE,
     )
     INVOICE_PATTERN = re.compile(r"\b(?:i\.\s*|inv[:\s]*)?(12\d{8}(?:[/-]\d{2,4})?)\b", re.IGNORECASE)
@@ -65,6 +68,9 @@ class ErodeLRSheetExtractor:
         ocr_lines: Optional[list] = None,
     ) -> ErodeLRSheet:
         """Extracts complete handwritten LR sheet structure from OCR text with FR4 image cropping."""
+        if not text and ocr_lines:
+            text = "\n".join(getattr(it, "text", "") for it in ocr_lines if getattr(it, "text", None))
+
         truck = cls._extract_truck(text)
         date_str = cls._extract_date(text)
         dest = cls._extract_dest(text)
@@ -97,9 +103,9 @@ class ErodeLRSheetExtractor:
 
         rows = []
         if ocr_lines:
-            rows = cls._extract_rows_spatial(ocr_lines, page_image, line_boxes)
+            rows = cls._extract_rows_spatial(ocr_lines, page_image, line_boxes, page_number=page_number)
         if not rows:
-            rows = cls._extract_rows(text, page_image, line_boxes)
+            rows = cls._extract_rows(text, page_image, line_boxes, page_number=page_number)
         total_packs, total_wt = cls._extract_footer_totals(text)
 
         confidence = 0.95 if rows else 0.40
@@ -128,6 +134,14 @@ class ErodeLRSheetExtractor:
         plate_match = cls.PLATE_REGEX.search(text)
         if plate_match:
             return re.sub(r"\s+", "", plate_match.group(1)).upper()
+        # Search window in first 15 lines if label is on separate line from vehicle plate
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        for i, line in enumerate(lines[:15]):
+            if re.search(r"\b(?:truck|lorry|vehicle)\b", line, re.I):
+                window = " ".join(lines[max(0, i - 1):min(len(lines), i + 3)])
+                m_win = cls.PLATE_REGEX.search(window)
+                if m_win:
+                    return re.sub(r"\s+", "", m_win.group(1)).upper()
         return None
 
     @classmethod
@@ -184,6 +198,7 @@ class ErodeLRSheetExtractor:
         ocr_lines: list,
         page_image: Optional[Image.Image] = None,
         line_boxes: Optional[dict[str, list[float]]] = None,
+        page_number: int = 1,
     ) -> list[ErodeLRRow]:
         if not ocr_lines:
             return []
@@ -191,8 +206,9 @@ class ErodeLRSheetExtractor:
         page_w = max((p[0] for it in ocr_lines for p in getattr(it, "box", [])), default=1754.0)
         page_h = max((p[1] for it in ocr_lines for p in getattr(it, "box", [])), default=1240.0)
 
-        header_y = page_h * 0.35
-        footer_y = page_h * 0.95
+        header_found = False
+        header_y = 0.0
+        footer_y = page_h + 10.0
 
         for it in ocr_lines:
             t = getattr(it, "text", "").lower()
@@ -200,10 +216,11 @@ class ErodeLRSheetExtractor:
             if not box:
                 continue
             y_mid = sum(p[1] for p in box) / 4.0
-            if any(k in t for k in ["lr. no", "lr.no", "party name", "weight in kgs", "bundles/reels"]):
-                header_y = max(header_y, y_mid + 10.0)
-            if any(k in t for k in ["total", "signature"]) and y_mid > page_h * 0.5:
-                footer_y = min(footer_y, y_mid - 10.0)
+            if y_mid < page_h * 0.40 and any(k in t for k in ["lr. no", "lr.no", "lr no", "party name", "weight in kgs", "weight in", "bundles/reels", "bundles / reels", "no. of bundles"]):
+                header_y = max(header_y, y_mid + 8.0) if header_found else (y_mid + 8.0)
+                header_found = True
+            if y_mid > page_h * 0.45 and any(k in t for k in ["total", "signature", "driver sign", "owner sign"]):
+                footer_y = min(footer_y, y_mid - 8.0)
 
         table_items = []
         for it in ocr_lines:
@@ -216,61 +233,111 @@ class ErodeLRSheetExtractor:
 
         table_items.sort(key=lambda x: x[0])
 
-        # Identify LR number anchors in left column (x / page_w < 0.25)
+        # Identify LR number anchors in left column (x_min / page_w < 0.28 and x_mid / page_w < 0.35)
+        # Genuine LR numbers in any 5-digit series (e.g. 30xxx, 29xxx) without artificial restrictions
         lr_anchors = []
         for y_mid, it in table_items:
             box = getattr(it, "box", [])
-            x_mid = sum(p[0] for p in box) / 4.0
-            if (x_mid / page_w) < 0.25:
-                t = getattr(it, "text", "")
-                m = re.findall(r"(?:^|[^\d])((?:2|3|0|8|9|4|7)[0-9bOo\s/]{3,7})(?:$|[^\d])", t)
-                if m:
-                    clean = re.sub(r"[\s/]+", "", m[0]).replace("O", "0").replace("o", "0").replace("b", "6").replace(")", "1")
-                    if len(clean) == 5:
-                        if clean[1] in ("9", "8") and clean[0] != "2":
-                            clean = "2" + clean[1:]
-                    elif len(clean) == 4 and clean.startswith("9"):
-                        clean = "2" + clean
-                    elif len(clean) > 5 and "29" in clean:
-                        idx_29 = clean.find("29")
-                        clean = clean[idx_29:idx_29+5]
+            x_min = min(p[0] for p in box) if box else 0.0
+            x_mid = sum(p[0] for p in box) / 4.0 if box else 0.0
+            if (x_min / page_w) > 0.28 or (x_mid / page_w) > 0.35:
+                continue
 
-                    if len(clean) == 5 and clean.startswith("29"):
-                        lr_anchors.append((y_mid, clean, it))
+            t = getattr(it, "text", "").strip()
+            conf_raw = getattr(it, "confidence", None)
+            conf_val = float(conf_raw) if conf_raw is not None else None
+
+            # Skip weights, decimals, and weight units
+            if re.search(r"\.\d+", t) or re.search(r"\b(?:kg|kgs|mt|ton|tons|wt|weight)\b", t, re.I):
+                continue
+            # Skip totals and signatures
+            if re.search(r"\b(?:total|tot|subtotal|signature|sign|driver|owner|broker|pallipalayam|dl\s*no)\b", t, re.I):
+                continue
+            # Skip dates
+            if re.search(r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b", t) or re.search(r"\b(?:date|dat|dte|dt)\b", t, re.I):
+                continue
+            # Skip vehicle numbers
+            if re.search(r"[A-Z]{2}\s*\d{1,2}\s*[A-Z]{0,3}\s*\d{4}", t, re.I) or re.search(r"\b(?:truck|lorry|vehicle)\b", t, re.I):
+                continue
+            # Skip invoice numbers and invoice prefixes (e.g. 1255, 12550, 125503, 125603, 1855, 1250510477)
+            if re.search(r"\b(?:12[56]|185|105|123)\d*", t) or re.search(r"\b(?:inv|invoice|bill|gst|eway)\b", t, re.I):
+                continue
+            # Skip serial numbers
+            if re.match(r"^\s*\d{1,2}[.)]?\s*$", t):
+                continue
+            # Skip postal codes
+            if re.search(r"\b638\d{3}\b", t):
+                continue
+            # Skip package tokens
+            if re.search(r"\b(?:bundles?|reels?|boxes?|bales?|bdl|bcy)\b", t, re.I):
+                continue
+
+            candidates = re.findall(r"(?:^|[^\d])([0-9bOoIl\s/]{4,7})(?:$|[^\d])", t)
+            for cand in candidates:
+                raw_cand = cand.strip()
+                clean = (
+                    re.sub(r"[\s/]+", "", raw_cand)
+                    .replace("O", "0")
+                    .replace("o", "0")
+                    .replace("I", "1")
+                    .replace("l", "1")
+                    .replace(")", "1")
+                    .replace("b", "6")
+                )
+                has_sub = (clean != re.sub(r"[\s/]+", "", raw_cand))
+                if clean in ("638001", "638002", "638007", "638008"):
+                    continue
+                if clean.isdigit() and len(clean) == 5:
+                    lr_anchors.append((y_mid, clean, raw_cand, conf_val, box, it, has_sub))
+                elif clean.isdigit() and len(clean) in (4, 6):
+                    c_adj = min(conf_val, 0.65) if conf_val is not None else None
+                    lr_anchors.append((y_mid, clean, raw_cand, c_adj, box, it, has_sub))
 
         lr_anchors.sort(key=lambda x: x[0])
+        min_row_gap = max(15.0, page_h * 0.015)
         u_anchors = []
-        for y, lr, it in lr_anchors:
-            if not u_anchors or (y - u_anchors[-1][0]) > 25.0:
-                u_anchors.append((y, lr, it))
-
-        if len(u_anchors) >= 2:
-            base_lr = int(u_anchors[0][1])
-            cleaned_anchors = []
-            for idx, (y, lr, it) in enumerate(u_anchors):
-                exp_lr = str(base_lr + idx)
-                if abs(int(lr) - (base_lr + idx)) <= 2:
-                    cleaned_anchors.append((y, exp_lr, it))
-                else:
-                    cleaned_anchors.append((y, lr, it))
-            u_anchors = cleaned_anchors
+        for anchor in lr_anchors:
+            y, clean, cand, conf, box, it, has_sub = anchor
+            if not u_anchors or (y - u_anchors[-1][0]) > min_row_gap:
+                u_anchors.append(anchor)
+            else:
+                prev_clean = u_anchors[-1][1]
+                prev_conf = u_anchors[-1][3] or 0.0
+                curr_conf = conf or 0.0
+                if (len(clean) == 5 and len(prev_clean) != 5) or (curr_conf > prev_conf and len(clean) == len(prev_clean)):
+                    u_anchors[-1] = anchor
 
         if not u_anchors:
             return []
 
         row_bands = []
-        for i in range(len(u_anchors)):
-            y_curr = u_anchors[i][0]
-            y_prev = u_anchors[i - 1][0] if i > 0 else y_curr - 30.0
-            y_next = u_anchors[i + 1][0] if i < len(u_anchors) - 1 else footer_y
-            top = (y_prev + y_curr) / 2.0
-            bottom = (y_curr + y_next) / 2.0
-            row_bands.append((top, bottom, u_anchors[i][1]))
+        n_anchors = len(u_anchors)
+        for i in range(n_anchors):
+            top = header_y if i == 0 else (u_anchors[i - 1][0] + u_anchors[i][0]) / 2.0
+            bottom = footer_y if i == n_anchors - 1 else (u_anchors[i][0] + u_anchors[i + 1][0]) / 2.0
+            row_bands.append((top, bottom, u_anchors[i]))
 
         rows: list[ErodeLRRow] = []
-        for top, bottom, lr_no in row_bands:
+        for top, bottom, anchor in row_bands:
+            y_anchor, lr_no, raw_cand, conf_val, box_val, it_val, has_sub = anchor
             band_lines = [getattr(it, "text", "") for y, it in table_items if top <= y < bottom]
-            parsed = cls._parse_lr_block(lr_no, band_lines, page_image, line_boxes)
+            row_bbox = None
+            if box_val and len(box_val) >= 4:
+                xs = [p[0] for p in box_val]
+                ys = [p[1] for p in box_val]
+                row_bbox = [min(xs), min(ys), max(xs), max(ys)]
+
+            parsed = cls._parse_lr_block(
+                lr_no=lr_no,
+                block_lines=band_lines,
+                page_image=page_image,
+                line_boxes=line_boxes,
+                raw_lr_text=raw_cand,
+                lr_conf=conf_val,
+                lr_bbox=row_bbox,
+                source_page=page_number,
+                has_substitution=has_sub,
+            )
             if parsed:
                 rows.append(parsed)
 
@@ -282,28 +349,57 @@ class ErodeLRSheetExtractor:
         text: str,
         page_image: Optional[Image.Image] = None,
         line_boxes: Optional[dict[str, list[float]]] = None,
+        page_number: int = 1,
     ) -> list[ErodeLRRow]:
         rows: list[ErodeLRRow] = []
         lines = [line.strip() for line in text.splitlines() if line.strip()]
 
         current_block: list[str] = []
         current_lr: Optional[str] = None
+        current_raw: Optional[str] = None
+        current_sub: bool = False
 
         for line in lines:
-            m = cls.LR_START_REGEX.search(line)
-            if m and not re.search(r"\b(?:phone|dl|truck|lorry|date|weight\s*in|broker|pallipalayam)\b", line, re.I):
-                raw_lr = m.group("lr")
-                clean_lr = re.sub(r"[\s/]+", "", raw_lr).replace(")", "1").replace("O", "0").replace("o", "0")
-                if len(clean_lr) == 5:
-                    if clean_lr[1] in ("9", "8") and clean_lr[0] != "2":
-                        clean_lr = "2" + clean_lr[1:]
+            # Standalone weights or totals lines are not new LR starts
+            if re.search(r"^\s*(?:total|tot|signature|driver|owner|broker|truck|lorry|date)\b", line, re.I):
+                continue
+            if re.search(r"^\s*\d+(?:\.\d+)?\s*(?:kg|kgs|mt|ton)?\s*$", line, re.I):
+                continue
 
-                if len(clean_lr) == 5 and clean_lr.startswith("29"):
+            m = cls.LR_START_REGEX.search(line)
+            if m and not re.search(r"\b(?:phone|dl|truck|lorry|date|weight\s*in|broker|pallipalayam|inv|invoice)\b", line, re.I):
+                raw_lr = m.group("lr")
+                if "." in raw_lr:
+                    continue
+                clean_lr = (
+                    re.sub(r"[\s/]+", "", raw_lr)
+                    .replace("O", "0")
+                    .replace("o", "0")
+                    .replace("I", "1")
+                    .replace("l", "1")
+                    .replace(")", "1")
+                    .replace("b", "6")
+                )
+                has_sub = (clean_lr != re.sub(r"[\s/]+", "", raw_lr))
+                if clean_lr.isdigit() and len(clean_lr) in (4, 5, 6):
+                    if clean_lr in ("638001", "638002", "638007", "638008"):
+                        continue
                     if current_lr and current_block:
-                        parsed_row = cls._parse_lr_block(current_lr, current_block, page_image, line_boxes)
+                        parsed_row = cls._parse_lr_block(
+                            lr_no=current_lr,
+                            block_lines=current_block,
+                            page_image=page_image,
+                            line_boxes=line_boxes,
+                            raw_lr_text=current_raw,
+                            lr_conf=None,
+                            source_page=page_number,
+                            has_substitution=current_sub,
+                        )
                         if parsed_row:
                             rows.append(parsed_row)
                     current_lr = clean_lr
+                    current_raw = raw_lr
+                    current_sub = has_sub
                     rest = line[:m.start()] + " " + line[m.end():]
                     current_block = [rest.strip()] if rest.strip() else []
                     continue
@@ -311,16 +407,36 @@ class ErodeLRSheetExtractor:
             if current_lr:
                 # Stop if we hit footer totals line
                 if re.match(r"^[-–—_]{5,}$", line) or re.search(r"\b(?:total|signature)\b", line, re.IGNORECASE):
-                    parsed_row = cls._parse_lr_block(current_lr, current_block, page_image, line_boxes)
+                    parsed_row = cls._parse_lr_block(
+                        lr_no=current_lr,
+                        block_lines=current_block,
+                        page_image=page_image,
+                        line_boxes=line_boxes,
+                        raw_lr_text=current_raw,
+                        lr_conf=None,
+                        source_page=page_number,
+                        has_substitution=current_sub,
+                    )
                     if parsed_row:
                         rows.append(parsed_row)
                     current_lr = None
+                    current_raw = None
+                    current_sub = False
                     current_block = []
                 else:
                     current_block.append(line)
 
         if current_lr and current_block:
-            parsed_row = cls._parse_lr_block(current_lr, current_block, page_image, line_boxes)
+            parsed_row = cls._parse_lr_block(
+                lr_no=current_lr,
+                block_lines=current_block,
+                page_image=page_image,
+                line_boxes=line_boxes,
+                raw_lr_text=current_raw,
+                lr_conf=None,
+                source_page=page_number,
+                has_substitution=current_sub,
+            )
             if parsed_row:
                 rows.append(parsed_row)
 
@@ -333,8 +449,36 @@ class ErodeLRSheetExtractor:
         block_lines: list[str],
         page_image: Optional[Image.Image] = None,
         line_boxes: Optional[dict[str, list[float]]] = None,
+        raw_lr_text: Optional[str] = None,
+        lr_conf: Optional[float] = None,
+        lr_bbox: Optional[list[float]] = None,
+        source_page: Optional[int] = None,
+        has_substitution: bool = False,
     ) -> Optional[ErodeLRRow]:
         full_block_text = " ".join(block_lines)
+
+        # 0. Provenance & Validation flags
+        needs_review = False
+        review_reasons = []
+
+        if not lr_no.isdigit() or len(lr_no) != 5:
+            needs_review = True
+            review_reasons.append(f"Non-standard LR number length ({len(lr_no)} digits): '{lr_no}'")
+
+        if lr_conf is None:
+            needs_review = True
+            review_reasons.append(f"Missing OCR confidence on LR '{lr_no}'")
+        elif lr_conf < 0.70:
+            needs_review = True
+            review_reasons.append(f"Low OCR confidence ({lr_conf:.2f}) on LR '{lr_no}'")
+
+        if has_substitution:
+            needs_review = True
+            review_reasons.append(
+                f"Character substitution applied: '{raw_lr_text or lr_no}' -> '{lr_no}'; requires manual review"
+            )
+
+        review_reason_str = "; ".join(review_reasons) if review_reasons else None
 
         # 1. Invoice extraction
         clean_inv_text = re.sub(r"\b18[5s](\d{7})\b", r"125\1", full_block_text)
@@ -399,18 +543,22 @@ class ErodeLRSheetExtractor:
             delivery_to = delivery_match.group(1).strip() if delivery_match else None
 
         # Party name is usually in the first line of the block
-        party_name = block_lines[0]
+        party_name = block_lines[0] if block_lines else "Unknown Party"
         # Clean out package/weight/invoice tokens from party name
         party_name = cls.PACKAGES_PATTERN.sub("", party_name)
         party_name = cls.WEIGHT_PATTERN.sub("", party_name)
         party_name = cls.INVOICE_PATTERN.sub("", party_name)
         party_name = re.sub(r"\b(?:del|den|delivery\s*(?:at|to)?)\b.*$", "", party_name, flags=re.IGNORECASE).strip()
+        if lr_no:
+            party_name = re.sub(r"^\s*(?:lr\.?\s*(?:no\.?)?\s*)?" + re.escape(lr_no) + r"\b", "", party_name, flags=re.IGNORECASE).strip()
+        if raw_lr_text and raw_lr_text != lr_no:
+            party_name = re.sub(r"^\s*" + re.escape(raw_lr_text) + r"\b", "", party_name, flags=re.IGNORECASE).strip()
 
         # 5. FR4: Crop handwritten LR number snippet if image and bbox available
         lr_crop = None
-        lr_bbox = line_boxes.get(lr_no) if line_boxes else None
-        if page_image and lr_bbox:
-            lr_crop = LRImageCropper.crop_bounding_box_base64(page_image, lr_bbox)
+        effective_bbox = lr_bbox or (line_boxes.get(lr_no) if line_boxes else None)
+        if page_image and effective_bbox:
+            lr_crop = LRImageCropper.crop_bounding_box_base64(page_image, effective_bbox)
 
         return ErodeLRRow(
             lr_number=lr_no,
@@ -423,8 +571,12 @@ class ErodeLRSheetExtractor:
             package_type=pack_type,
             weight_kg=weight_val,
             lr_crop_base64=lr_crop,
-            bbox=lr_bbox,
-            confidence=0.95,
+            bbox=effective_bbox,
+            raw_lr_text=raw_lr_text or lr_no,
+            source_page=source_page,
+            needs_review=needs_review,
+            review_reason=review_reason_str,
+            confidence=round(lr_conf, 3) if lr_conf is not None else None,
         )
 
     @classmethod

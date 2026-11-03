@@ -1046,15 +1046,17 @@ class TMSMapperService:
         )
 
         # 7. LR Number
-        lr_status = FieldStatus.VERIFIED if rc.lr_number_raw else FieldStatus.NOT_FOUND
+        lr_is_missing = not rc.lr_number_raw or rc.lr_number_raw in ("MISSING_LR", "NEEDS_REVIEW")
+        lr_status = FieldStatus.NEEDS_REVIEW if lr_is_missing else FieldStatus.VERIFIED
         c_fields["lr_number"] = TMSExtractedField(
             field_name="LR Number" if is_group else "LR #",
             clean_id="lr_number",
-            value=rc.lr_number_raw or None,
+            value=None if lr_is_missing else rc.lr_number_raw,
             status=lr_status,
-            confidence=0.95 if rc.lr_number_raw else 0.0,
+            confidence=0.0 if lr_is_missing else 0.95,
             source_page=rc.source_page,
             source_doc="LR Header / Despatch Table",
+            audit_note="LR number not found or unreadable on physical LR sheet; manual review required." if lr_is_missing else None,
             is_mandatory=False,
             data_type=TMSFieldDataType.TEXT,
         )

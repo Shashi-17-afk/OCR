@@ -436,16 +436,22 @@ class TMSExcelExporter:
         clean_id: str,
         default_val: Any = "",
     ) -> Any:
-        """Retrieves field value from consignment or trip dictionary, falling back to default."""
+        """Retrieves field value from consignment or trip dictionary, sanitizing sentinels and falling back to default."""
         if consignment and hasattr(consignment, "fields"):
             field = consignment.fields.get(clean_id)
-            if field and field.value is not None and str(field.value).strip() != "":
-                return field.value
+            if field and field.value is not None:
+                val_str = str(field.value).strip()
+                if val_str and val_str not in ("MISSING_LR", "UNKNOWN_DATE"):
+                    return field.value
 
         trip_field = truck.trip_fields.get(clean_id)
-        if trip_field and trip_field.value is not None and str(trip_field.value).strip() != "":
-            return trip_field.value
+        if trip_field and trip_field.value is not None:
+            val_str = str(trip_field.value).strip()
+            if val_str and val_str not in ("MISSING_LR", "UNKNOWN_DATE"):
+                return trip_field.value
 
+        if default_val in ("UNKNOWN_DATE", "MISSING_LR"):
+            return ""
         return default_val
 
     @classmethod

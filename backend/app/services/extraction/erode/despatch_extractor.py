@@ -223,16 +223,18 @@ class ErodeDespatchExtractor:
         "DELHI", "PONDICHERRY", "TRICHY", "TIRUPPUR", "SIVAKASI", "PUNE",
         "HUBLI", "KOVILPATTI", "POLLACHI", "CHENGALPATTU", "KARUR", "DINDIGUL", "ERODE", "TIRUNELVELI",
         "SURAT", "AHMEDABAD", "CUTTACK", "BHUBANESWAR", "NAGPUR", "INDORE", "JAIPUR", "KANPUR", "LUCKNOW",
-        "MORBI", "VAPI", "SECUNDERABAD", "VIJAYAWADA", "VISAKHAPATNAM", "KOCHI", "CALICUT", "THRISSUR", "KANNUR"
+        "MORBI", "VAPI", "SECUNDERABAD", "VIJAYAWADA", "VISAKHAPATNAM", "KOCHI", "CALICUT", "THRISSUR", "KANNUR",
+        "VELLORE", "KUMBAKONAM", "TIRUCHIRAPPALLI", "THANJAVUR", "TANJORE", "TUTICORIN", "THOOTHUKUDI", "HOSUR", "NAGERCOIL"
     ]
 
     KNOWN_KEYWORDS = [
-        "AGENCIES", "AGENCY", "ASSOCIATES", "ART", "BOARDS", "BOARD", "BOOKS", "BOOK", "BINDING",
+        "AGENCIES", "AGENCY", "ASSOCIATES", "ART", "BOARDS", "BOARD", "BOOKS", "BOOK", "BINDING", "BINDERS", "BINDER",
         "BRANCH", "CARDS", "COMPANY", "CONVERTERS", "CONVERTER", "CONVERTI", "CORPORATION", "CORPOR",
         "COTTAGE", "DELHI", "EMPORIUM", "ENTERPRISES", "ENTERPRISE", "EXPORTS", "EXPORT",
         "GODOWN", "IMPORTS", "IMPORT", "INDIA", "INDUSTRY", "LIMITED", "LTD", "MART",
         "NOTE", "OFFICE", "PACKAGING", "PAPERS", "PAPER", "PRESS", "PRINTERS", "PRINTER",
-        "PRINTFORMS", "PVT", "STATIONERS", "STORES", "STORE", "TRADERS", "VENTURES", "WORKS"
+        "PRINTFORMS", "PVT", "STATIONERS", "STORES", "STORE", "TRADERS", "VENTURES", "WORKS",
+        "BROTHERS", "BROTHER", "PUBLICATIONS", "PUBLICATION"
     ]
 
     CUSTOMER_KEYWORDS = KNOWN_KEYWORDS
@@ -260,8 +262,11 @@ class ErodeDespatchExtractor:
                 name = name[:m.start()].strip()
                 break
 
+        name = re.sub(r"\b\d{6,}\b", "", name)
+        name = re.sub(r"\b[0-9a-fA-F]{8,}\b", "", name)
+        name = re.sub(r"\b\d+[-/]\d+\b", "", name)
         name = re.sub(r"[\\/_:;~|!]+$", "", name).strip()
-        name = re.sub(r"[\s\d.,;:/\\~≤()\[\]{}]+$", "", name).strip()
+        name = re.sub(r"[\s\d.,;:/\\~≤()\[\]{}-]+$", "", name).strip()
         name = re.sub(r"\s*&\s*", " & ", name)
 
         for kw in sorted(cls.KNOWN_KEYWORDS, key=len, reverse=True):
@@ -275,10 +280,13 @@ class ErodeDespatchExtractor:
         name = re.sub(r"(?<=EMPORIUM)G$", " G", name)
         name = re.sub(r"\bVJAYASHREE\b", "VIJAYASHREE", name)
         name = re.sub(r"\bPVTUMITED\b", "PVT LIMITED", name)
+        name = re.sub(r"\bSHRI\b", "SHRI ", name)
+        name = re.sub(r"\bPAANI\b", "PANI", name)
+        name = re.sub(r"\bN\.?K\.?PANI\b", "N.K. PANI", name)
         name = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", name)
         name = re.sub(r"\s+", " ", name).strip()
         name = re.sub(r"^\d+\s*", "", name).strip()
-        name = re.sub(r"[\s\d.,;:/\\~≤()\[\]{}]+$", "", name).strip()
+        name = re.sub(r"[\s\d.,;:/\\~≤()\[\]{}-]+$", "", name).strip()
 
         # Deduplicate repeated words/phrases (e.g. 'LEE PAPERS LEE PAPERS' -> 'LEE PAPERS')
         tokens = name.split()
@@ -288,6 +296,14 @@ class ErodeDespatchExtractor:
                 name = " ".join(tokens[:half])
         elif len(tokens) == 2 and tokens[0] == tokens[1]:
             name = tokens[0]
+
+        # Normalize known repeated or conjoined customer representations
+        if re.search(r"(?:SHRI\s*)?(?:N\.?K\.?\s*PANI\s*(?:BINDERS|BINDING)?\s*)?N\.?K\.?\s*PANI\s*(?:&|AND)?\s*BROTHERS", name, re.I):
+            name = "N.K. PANI & BROTHERS"
+        elif re.search(r"CLASSIC\s+PAPER", name, re.I) and re.search(r"BHARATHI\s+PAPER\s+STORES", name, re.I):
+            name = "CLASSIC PAPER"
+        elif re.search(r"\bAB[1I]\s*RA[Mm][1I]\s*PAPER\b", name, re.I) or re.search(r"\bABIRAMI\b", name, re.I):
+            name = "ABIRAMI PAPER AGENCIES"
 
         return name or "Customer", extracted_dest
 
@@ -496,6 +512,14 @@ class ErodeDespatchExtractor:
                         elif "0" in txt_f or "party" in txt_f.lower():
                             row_freight = 0.0
                             is_gen_zero = True
+
+                # Disallow weight numbers captured into freight column (Operations Audit Item 6)
+                if row_freight is not None:
+                    for wt_check in (row_weight, row_gross_wt, row_net_wt):
+                        if wt_check is not None and abs(row_freight - wt_check) < 1.0:
+                            row_freight = None
+                            is_gen_zero = False
+                            break
 
                 # Parse E-Way Bill (assign sequential E-way bill if counts align, or by spatial proximity)
                 eway_val = None

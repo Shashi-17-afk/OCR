@@ -207,6 +207,9 @@ class RapidPaddleOCREngine(BaseOCREngine):
             0: (out_0, score_0, float(w_orig), float(h_orig))
         }
 
+        best_k = 0
+        best_score = score_0
+
         for k in (1, 2, 3):
             rot_img = np.ascontiguousarray(np.rot90(img_arr, k=k))
             out_k, _ = self._engine(rot_img)
@@ -214,16 +217,22 @@ class RapidPaddleOCREngine(BaseOCREngine):
             h_rot, w_rot = rot_img.shape[:2]
             candidates[k] = (out_k, score_k, float(w_rot), float(h_rot))
 
-        # Select candidate with highest structural score.
-        # Candidate k in (1, 2, 3) must beat 0° by at least 10% to prevent unnecessary rotation on borderline pages.
-        best_k = 0
-        best_score = score_0
-
-        for k in (1, 2, 3):
-            cand_out, cand_score, _, _ = candidates[k]
-            if cand_score > (best_score * 1.10) and cand_out:
+            if score_k > (best_score * 1.10) and out_k:
                 best_k = k
-                best_score = cand_score
+                best_score = score_k
+
+            # Decisive candidate early-exit: If rotated candidate achieves strong structural score >= 180 and decisively beats 0° by 2x,
+            # remaining rotations cannot possibly beat it. Skip them to save CPU time.
+            if score_k >= 180.0 and score_k >= (score_0 * 2.0):
+                logger.info(
+                    "Decisive OCR orientation early-exit triggered at rotation k=%d (%d° CCW) "
+                    "with score=%.1f (vs 0° score=%.1f). Skipping remaining rotations.",
+                    k,
+                    k * 90,
+                    score_k,
+                    score_0,
+                )
+                break
 
         logger.info(
             "OCR orientation evaluation completed (early_exit=False). Selected rotation k=%d (%d° CCW) "

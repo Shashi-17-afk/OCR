@@ -1,3 +1,4 @@
+import asyncio
 from typing import Optional
 
 from fastapi import APIRouter, Body, File, HTTPException, Query, Response, UploadFile, status
@@ -570,7 +571,8 @@ async def reconcile_erode_document(
 
     filename = file.filename or "erode_document"
     try:
-        extract_res = ErodeExtractionService.process(
+        extract_res = await asyncio.to_thread(
+            ErodeExtractionService.process,
             content=content,
             original_filename=filename,
             booking_type=booking_type,

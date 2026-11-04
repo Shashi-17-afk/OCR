@@ -121,15 +121,27 @@ class ErodeLinker:
         # Direct shipment: exactly 1 consignment claims all invoices on the truck
         if is_direct and despatch_sheet and despatch_sheet.rows:
             main_lr = (
-                (lr_sheet.rows[0].lr_number if (lr_sheet and lr_sheet.rows) else None)
+                (lr_sheet.rows[0].lr_number if (lr_sheet and lr_sheet.rows and lr_sheet.rows[0].lr_number) else None)
                 or (re.search(r"\b29\d{3}\b", lr_sheet.destination or "").group(0) if (lr_sheet and re.search(r"\b29\d{3}\b", lr_sheet.destination or "")) else None)
-                or "29731"
+                or "MISSING_LR"
             )
             cust_name = despatch_sheet.rows[0].customer_name
             dest_name = despatch_sheet.rows[0].destination
             unit_str = getattr(despatch_sheet, "package_unit", "bundles")
-            packages_str = f"{despatch_sheet.total_bundles} {unit_str}" if despatch_sheet.total_bundles else "Unspecified"
-            package_count = despatch_sheet.total_bundles
+
+            # Preserve LR sheet package count if present to detect discrepancies (Audit Item 4)
+            lr_pkgs = lr_sheet.total_packages if (lr_sheet and lr_sheet.total_packages) else None
+            if lr_pkgs is None and lr_sheet and lr_sheet.rows and lr_sheet.rows[0].package_count:
+                lr_pkgs = lr_sheet.rows[0].package_count
+            package_count = lr_pkgs if lr_pkgs is not None else despatch_sheet.total_bundles
+            packages_str = f"{package_count} {unit_str}" if package_count else "Unspecified"
+
+            # Preserve LR sheet weight if present to detect discrepancies (Audit Item 5)
+            lr_wt = lr_sheet.total_weight_kg if (lr_sheet and lr_sheet.total_weight_kg) else None
+            if lr_wt is None and lr_sheet and lr_sheet.rows and lr_sheet.rows[0].weight_kg:
+                lr_wt = lr_sheet.rows[0].weight_kg
+            weight_val = lr_wt if lr_wt is not None else despatch_sheet.total_gross_weight_kg
+
             single_lr_row = ErodeLRRow(
                 lr_number=main_lr,
                 party_name=cust_name,
@@ -139,7 +151,7 @@ class ErodeLinker:
                 packages_str=packages_str,
                 package_count=package_count,
                 package_type=unit_str,
-                weight_kg=despatch_sheet.total_gross_weight_kg,
+                weight_kg=weight_val,
             )
             consignments.append(
                 LinkedErodeConsignment(
@@ -221,6 +233,17 @@ class ErodeLinker:
                             )
                         )
 
+            # Preserve any remaining unmatched LR rows so handwritten records are never silently dropped
+            remaining_unmatched_lrs = [r for r in lr_sheet.rows if not any(c.lr_row == r for c in consignments)]
+            for lr_r in remaining_unmatched_lrs:
+                consignments.append(
+                    LinkedErodeConsignment(
+                        lr_row=lr_r,
+                        linked_despatch_rows=[],
+                        unmatched_invoices=list(lr_r.invoices),
+                    )
+                )
+
         # Stage C: Unclaimed Despatch rows in Group booking
         unassigned_despatch: list[ErodeDespatchRow] = []
         if despatch_sheet:
@@ -265,11 +288,9 @@ class ErodeLinker:
                     if calc_wt > 0:
                         lr_r.weight_kg = calc_wt
 
-                # Update package count if missing on LR
+                # Do not synthesize or guess package count if missing on LR; preserve source status
                 if lr_r.package_count is None or lr_r.package_count == 0:
-                    if lr_r.weight_kg and tot_bnd and tot_wt and tot_wt > 0:
-                        lr_r.package_count = max(1, round(tot_bnd * (lr_r.weight_kg / tot_wt)))
-                        lr_r.packages_str = f"{lr_r.package_count} {unit_str}"
+                    lr_r.package_count = None
 
         return ErodeLinkResult(
             truck_number=truck_number,
@@ -310,7 +331,74 @@ class ErodeBatchPartitioner:
 
         for p in pages:
             if p.classification == PageClassificationType.DESPATCH_SHEET:
-                # Despatch Sheet marks the end boundary of a truck shipment
+                despatch = p.despatch
+
+                # Check 1: Empty or contentless Despatch page (0 rows, no totals, no truck registration)
+                is_empty_despatch = (
+                    not despatch
+                    or (
+                        not despatch.rows
+                        and despatch.total_bundles is None
+                        and despatch.total_gross_weight_kg is None
+                        and not despatch.truck_number
+                    )
+                )
+                if is_empty_despatch:
+                    # If an LR sheet is currently being accumulated, keep it open; do not cut a bundle
+                    if current_lr_sheets:
+                        current_page_nums.append(p.page_number)
+                        continue
+                    # If preceding bundle exists, attach page number to it as trailing scan
+                    if bundles:
+                        bundles[-1].page_numbers.append(p.page_number)
+                        continue
+                    continue
+
+                # Check 2: Evidence-based Despatch Continuation Sheet
+                # A Despatch sheet is a continuation of the immediately preceding bundle if:
+                # 1) An existing bundle already has a despatch_sheet.
+                # 2) No intermediate LR sheets intervened (current_lr_sheets is empty).
+                # 3) The page does not introduce a new conflicting truck plate (either None or matches preceding truck).
+                # 4) The page contains continuation content (invoice rows, or continuation summary totals).
+                if bundles and bundles[-1].despatch_sheet and not current_lr_sheets:
+                    prev_truck = re.sub(r"\s+", "", bundles[-1].truck_number or "").upper()
+                    curr_truck = (
+                        re.sub(r"\s+", "", despatch.truck_number).upper()
+                        if (despatch and despatch.truck_number)
+                        else None
+                    )
+                    is_continuation = (
+                        (curr_truck is None or curr_truck == prev_truck or prev_truck == "UNKNOWN_TRUCK")
+                        and despatch
+                        and (
+                            bool(despatch.rows)
+                            or despatch.total_bundles is not None
+                            or despatch.total_gross_weight_kg is not None
+                        )
+                    )
+                    if is_continuation:
+                        prev_b = bundles[-1]
+                        prev_b.page_numbers.append(p.page_number)
+                        if despatch.rows:
+                            existing_invs = set(r.invoice_no for r in prev_b.despatch_sheet.rows)
+                            for r in despatch.rows:
+                                if r.invoice_no not in existing_invs:
+                                    prev_b.despatch_sheet.rows.append(r)
+                                    existing_invs.add(r.invoice_no)
+                        if despatch.total_bundles is not None:
+                            prev_b.despatch_sheet.total_bundles = despatch.total_bundles
+                            prev_b.despatch_sheet.package_unit = despatch.package_unit
+                        if despatch.total_gross_weight_kg is not None:
+                            prev_b.despatch_sheet.total_gross_weight_kg = despatch.total_gross_weight_kg
+                        if despatch.total_net_weight_kg is not None:
+                            prev_b.despatch_sheet.total_net_weight_kg = despatch.total_net_weight_kg
+                        if (not prev_b.booking_date or prev_b.booking_date == "UNKNOWN_DATE") and (despatch.date and despatch.date != "UNKNOWN_DATE"):
+                            prev_b.booking_date = despatch.date
+                        if prev_b.truck_number == "UNKNOWN_TRUCK" and curr_truck:
+                            prev_b.truck_number = curr_truck
+                        continue
+
+                # Standard Despatch Sheet marks the end boundary of a truck shipment
                 current_page_nums.append(p.page_number)
                 despatch = p.despatch
 
@@ -464,7 +552,7 @@ class ErodeBatchPartitioner:
                 or next((s.total_packages for s in b.lr_sheets if s.total_packages), None)
             )
 
-            # 1. Match by invoice numbers
+            # 1. Match ONLY by concrete invoice numbers cross-referenced in source documents
             u_invs: set[str] = set()
             if b.despatch_sheet:
                 u_invs.update(r.invoice_no for r in b.despatch_sheet.rows if r.invoice_no)
@@ -475,38 +563,15 @@ class ErodeBatchPartitioner:
             if u_invs:
                 for kt in known_trucks:
                     kt_invs = set(r.invoice_no for r in kt.despatch_sheet.rows if r.invoice_no) if kt.despatch_sheet else set()
+                    for s in kt.lr_sheets:
+                        for r in s.rows:
+                            kt_invs.update(r.invoices)
                     if u_invs.intersection(kt_invs):
                         target_truck = kt
                         break
 
-            # 2. Match by customer name overlap
-            if not target_truck:
-                u_custs: set[str] = set()
-                if b.despatch_sheet:
-                    u_custs.update(extract_customer_root(r.customer_name) for r in b.despatch_sheet.rows if r.customer_name)
-                for s in b.lr_sheets:
-                    u_custs.update(extract_customer_root(r.party_name) for r in s.rows if r.party_name)
-
-                if u_custs:
-                    for kt in known_trucks:
-                        kt_custs = set(extract_customer_root(r.customer_name) for r in kt.despatch_sheet.rows if r.customer_name) if kt.despatch_sheet else set()
-                        if u_custs.intersection(kt_custs):
-                            target_truck = kt
-                            break
-
-            # 3. Match by gross weight (within 5 kg) or package totals if candidate truck lacks an LR sheet
-            if not target_truck and (u_weight or u_packs):
-                cand_trucks = [kt for kt in known_trucks if not kt.lr_sheets]
-                for kt in cand_trucks:
-                    kt_wt = kt.despatch_sheet.total_gross_weight_kg if kt.despatch_sheet else None
-                    kt_pk = kt.despatch_sheet.total_bundles if kt.despatch_sheet else None
-                    if u_weight and kt_wt and abs(u_weight - kt_wt) <= 5.0:
-                        target_truck = kt
-                        break
-                    if u_packs and kt_pk and u_packs == kt_pk:
-                        target_truck = kt
-                        break
-
+            # If no concrete invoice cross-reference exists, b remains UNKNOWN_TRUCK
+            # with its source page provenance preserved for manual review.
             if target_truck:
                 target_truck.lr_sheets.extend(b.lr_sheets)
                 target_truck.page_numbers.extend(b.page_numbers)

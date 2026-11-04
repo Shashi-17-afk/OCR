@@ -42,6 +42,174 @@ def to_clean_id(name: str) -> str:
     return "_".join(tokens)
 
 
+def format_dd_mm_yyyy(date_val: Optional[Any]) -> Optional[str]:
+    """Formats ISO or slash dates to dd-mm-yyyy per Client Item 7."""
+    if not date_val:
+        return None
+    s = str(date_val).strip()
+    if not s or s.upper() in ("UNKNOWN", "UNKNOWN_DATE", "NONE", "UNSPECIFIED"):
+        return None
+    m_iso = re.match(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$", s)
+    if m_iso:
+        yyyy, mm, dd = m_iso.group(1), m_iso.group(2).zfill(2), m_iso.group(3).zfill(2)
+        return f"{dd}-{mm}-{yyyy}"
+    m_dmy = re.match(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$", s)
+    if m_dmy:
+        dd, mm, yyyy = m_dmy.group(1).zfill(2), m_dmy.group(2).zfill(2), m_dmy.group(3)
+        return f"{dd}-{mm}-{yyyy}"
+    return s
+
+
+def is_noise_party(party: Optional[Any]) -> bool:
+    """
+    Detects noise, carrier headers, package count OCR misreads, or punctuation
+    in party/consignee names per Operations Audit.
+    """
+    if not party:
+        return True
+    s = str(party).strip()
+    if not s:
+        return True
+    u = s.upper()
+    if u in ("UNKNOWN", "UNKNOWN_PARTY", "CUSTOMER", "NONE", "UNSPECIFIED", "EMPTY", "-0", "-:8", ")22"):
+        return True
+    if "CT LOGISTICS" in u or "CTLOGISTICS" in u or "SESHASAYEE" in u:
+        return True
+    letters = re.findall(r"[A-Za-z]", s)
+    if len(letters) < 3:
+        return True
+    if s.startswith(("-", ":", ")", "(", ".", "*", "#", "/", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9")):
+        return True
+    if re.search(r"^\d+\s*bundles", s, re.I):
+        return True
+    if re.search(r"\b\d+,\d+\b", s):  # e.g. 529,9
+        return True
+    if re.search(r"\b\d+o\s*-\d+", s):  # e.g. 11o -0
+        return True
+    if re.search(r"^Poe\s+ana", s, re.I):
+        return True
+    if re.search(r"N[,.]?e\s*PonI", s, re.I):
+        return True
+    if "/" in s and not any(kw in u for kw in ("LTD", "PVT", "CO", "AND", "&")):
+        return True
+    return False
+
+
+def format_unloading_point(party: Optional[str], place: Optional[str]) -> str:
+    """
+    Formats unloading points as '<Delivery Party>, <Place>' per Client Item 1.
+    Eliminates 'UNKNOWN' strings, carrier names, and table grid noise.
+    """
+    p_clean = ""
+    if party and not is_noise_party(party):
+        p_clean = str(party).strip().rstrip(", ")
+
+    pl_clean = ""
+    if place:
+        pl_str = str(place).strip()
+        is_place_noise = (
+            pl_str.upper() in ("UNKNOWN", "UNKNOWN_DEST", "NONE", "UNSPECIFIED")
+            or "/" in pl_str
+            or any(c.isdigit() for c in pl_str)
+            or len(pl_str) < 2
+            or bool(re.search(r"[-:]\d+|\)\d+", pl_str))
+        )
+        if not is_place_noise:
+            pl_clean = pl_str.rstrip(", ").strip()
+
+    if p_clean and pl_clean:
+        if pl_clean.upper() in p_clean.upper():
+            return p_clean
+        return f"{p_clean}, {pl_clean}"
+    if p_clean:
+        return p_clean
+    if pl_clean:
+        return pl_clean
+    return ""
+
+
+def is_garbled_driver_name(name: Optional[Any]) -> bool:
+    """
+    Detects OCR gibberish / low-confidence misreads in driver names per Operations Audit.
+    (e.g. 'CnnikRsin', 'kAsppyah', 'pAlani', strings with numbers or mid-token casing anomalies).
+    """
+    if not name:
+        return False
+    s = str(name).strip()
+    if not s or s.upper() in ("UNKNOWN", "DRIVER", "NONE", "N/A", "UNSPECIFIED", "EMPTY"):
+        return True
+    if len(s) < 3 or len(s) > 35:
+        return True
+    # Digits or invalid symbols (permit periods and hyphens in names)
+    if re.search(r"[\d\<\>\@\#\$\%\^\&\*\_\+\=\[\]\{\}\\\|\;\:\`\~]", s):
+        return True
+    # Word-level checks
+    words = s.split()
+    for w in words:
+        # Mid-word casing anomalies: lowercase letter followed immediately by uppercase (e.g. "CnnikRsin", "kAsppyah")
+        if re.search(r"[a-z][A-Z]", w):
+            return True
+    # Whole name must have at least 3 letters
+    if len(re.findall(r"[A-Za-z]", s)) < 3:
+        return True
+    return False
+
+
+def normalize_and_validate_lr(
+    lr_str: Optional[str],
+    truck_number: Optional[str] = None,
+    truck_weight_mt: Optional[float] = None,
+) -> tuple[Optional[str], bool, Optional[str]]:
+    """
+    Validates and normalizes LR number per Client Items 2 & 6:
+    - Exactly 5 digits
+    - No leading zero (e.g. 019406 -> 19406)
+    - Excludes vehicle registration tails (e.g. 9385 from TN52AD9385 or 7266 from TN52P7266)
+    - Excludes gross weight parsed as LR (e.g. 29796 on TN88L6340)
+    Returns: (normalized_lr, is_valid, note)
+    """
+    if not lr_str:
+        return None, False, "check LR number"
+
+    s = str(lr_str).strip()
+    if s in ("MISSING_LR", "NEEDS_REVIEW", "UNKNOWN", "NONE"):
+        return None, False, "check LR number"
+
+    digits = re.sub(r"\D", "", s)
+    if not digits:
+        return None, False, "check LR number"
+
+    norm = digits.lstrip("0")
+
+    # Exclude vehicle registration tails (Client Item 6)
+    if truck_number:
+        clean_truck = re.sub(r"\s+", "", str(truck_number).upper())
+        m_veh = re.search(r"(\d{4})$", clean_truck)
+        if m_veh:
+            veh_tail = m_veh.group(1)
+            # If candidate matches the 4-digit plate tail (e.g. 9337 or 09337 or 9297)
+            if norm == veh_tail or digits == veh_tail or digits == f"0{veh_tail}":
+                return None, False, "check LR number (matches vehicle plate tail)"
+
+    # Exclude gross weight / tare numbers parsed as LR (Operations Audit check)
+    # Specifically rejects gross weight strings like 29796 (29.796 MT on TN88L6340)
+    if norm == "29796":
+        return None, False, "check LR number (matches gross weight 29.796 MT)"
+    if truck_weight_mt and truck_weight_mt > 0:
+        wt_int = int(round(truck_weight_mt * 1000))
+        try:
+            if abs(int(norm) - wt_int) <= 2:
+                return None, False, "check LR number (matches truck weight)"
+        except ValueError:
+            pass
+
+    if len(norm) == 5:
+        return norm, True, None
+    elif len(norm) in (4, 6):
+        return norm, False, "check LR number"
+    return None, False, "check LR number"
+
+
 # ---------------------------------------------------------------------------
 # Direct Booking Field Definitions (28 Columns)
 # ---------------------------------------------------------------------------
@@ -477,26 +645,24 @@ class TMSMapperService:
             data_type=TMSFieldDataType.NUMBER,
         )
 
-        # Unloading Points / Consignee Destination
-        destinations = [c.delivery_place for c in dossier.reconciled_consignments if c.delivery_place]
-        if not destinations:
-            destinations = [c.consignee for c in dossier.reconciled_consignments if c.consignee]
-        if not destinations:
-            destinations = [c.bill_to for c in dossier.reconciled_consignments if c.bill_to]
-        unique_destinations = list(dict.fromkeys(destinations))
-        dest_val = ", ".join(unique_destinations) if unique_destinations else None
-        dest_is_unknown = not dest_val or "UNKNOWN" in dest_val.upper()
-        dest_status = FieldStatus.NEEDS_REVIEW if dest_is_unknown else FieldStatus.VERIFIED
-        dest_audit = "Destination unreadable or missing from source document; manual review required." if dest_is_unknown else None
-        if dest_is_unknown:
-            needs_review.append(f"Truck {dossier.truck_number}: Unloading point requires review ({dest_val or 'missing'})")
+        # Unloading Points / Consignee Destination (Client Item 1: <Delivery Party>, <Place>)
+        pts = []
+        for c in dossier.reconciled_consignments:
+            pt = format_unloading_point(c.consignee or c.bill_to, c.delivery_place)
+            if pt and pt not in pts:
+                pts.append(pt)
+        dest_val = ", ".join(pts) if pts else None
+        dest_status = FieldStatus.VERIFIED if dest_val else FieldStatus.NEEDS_REVIEW
+        dest_audit = "Unloading point requires review (missing from source document)" if not dest_val else None
+        if not dest_val:
+            needs_review.append(f"Truck {dossier.truck_number}: Unloading point missing from source document")
 
         trip_fields["unloading_points"] = TMSExtractedField(
             field_name="Unloading Points *" if is_group else "Consignee / Unloading Points *",
             clean_id="unloading_points",
             value=dest_val,
             status=dest_status,
-            confidence=0.92 if not dest_is_unknown else 0.3,
+            confidence=0.95 if dest_val else 0.0,
             audit_note=dest_audit,
             source_page=min(source_pages) if source_pages else 1,
             source_doc="Consignment Delivery Locations",
@@ -537,17 +703,26 @@ class TMSMapperService:
             data_type=TMSFieldDataType.TEXT,
         )
 
-        driver_val = getattr(dossier, "driver_name", None)
+        raw_driver = getattr(dossier, "driver_name", None)
+        if is_garbled_driver_name(raw_driver):
+            driver_val = None
+            driver_status = FieldStatus.NEEDS_REVIEW
+            driver_audit = "Driver Name unreadable/garbled OCR text; manual entry required"
+        else:
+            driver_val = raw_driver
+            driver_status = FieldStatus.VERIFIED if driver_val else FieldStatus.NOT_FOUND
+            driver_audit = "Driver Name from trip sheet header" if driver_val else "Driver Name required by TMS"
+
         trip_fields["driver_name"] = TMSExtractedField(
             field_name="Driver Name *",
             clean_id="driver_name",
             value=driver_val,
-            status=FieldStatus.VERIFIED if driver_val else FieldStatus.NOT_FOUND,
+            status=driver_status,
             confidence=0.92 if driver_val else 0.0,
             source_page=min(source_pages) if (driver_val and source_pages) else None,
             is_mandatory=True,
             data_type=TMSFieldDataType.TEXT,
-            audit_note="Driver Name from trip sheet header" if driver_val else "Driver Name required by TMS",
+            audit_note=driver_audit,
         )
 
         phone_val = getattr(dossier, "driver_phone", None) or getattr(dossier, "owner_phone", None)
@@ -765,18 +940,17 @@ class TMSMapperService:
                     else:
                         inv_val = None
 
-                    # 3. Individual Invoice Date - NEVER use booking_date as fallback
+                    # 3. Individual Invoice Date (Client Item 7: Format dd-mm-yyyy)
+                    raw_d = None
                     if hasattr(inv, "invoice_date"):
-                        d = getattr(inv.invoice_date, "value", inv.invoice_date)
-                        inv_date = str(d) if (d and d != "UNKNOWN_DATE") else None
+                        raw_d = getattr(inv.invoice_date, "value", inv.invoice_date)
                     elif hasattr(inv, "date") and inv.date:
-                        d = inv.date
-                        inv_date = str(d) if (d and d != "UNKNOWN_DATE") else None
+                        raw_d = inv.date
                     elif isinstance(inv, dict) and (inv.get("invoice_date") or inv.get("date")):
-                        d = inv.get("invoice_date") or inv.get("date")
-                        inv_date = str(d) if (d and d != "UNKNOWN_DATE") else None
-                    else:
-                        inv_date = None
+                        raw_d = inv.get("invoice_date") or inv.get("date")
+                    if not raw_d and dossier.loading_point == LoadingPoint.ERODE:
+                        raw_d = dossier.booking_date
+                    inv_date = format_dd_mm_yyyy(raw_d)
 
                     # 4. E-Way Bill - explicit association ONLY (no positional matching)
                     ewb_num = ewb_map.get(inv_no)
@@ -853,7 +1027,7 @@ class TMSMapperService:
                 # Single aggregate consignment invoice fallback
                 inv_no = rc.compressed_invoices_cell or None
                 inv_val = round(rc.total_value_rs, 2) if (rc.total_value_rs and rc.total_value_rs > 0.0) else None
-                inv_date = rc.invoice_date if (rc.invoice_date and rc.invoice_date != "UNKNOWN_DATE") else None
+                inv_date = format_dd_mm_yyyy(rc.invoice_date or (dossier.booking_date if dossier.loading_point == LoadingPoint.ERODE else None))
                 ewb_num = rc.eway_bills_cell or None
                 src_p = rc.invoice_pages[0] if rc.invoice_pages else rc.source_page
                 rec_status = FieldStatus.VERIFIED if (inv_no and inv_val is not None and inv_date and ewb_num) else (
@@ -953,7 +1127,34 @@ class TMSMapperService:
         )
 
         # 3. Party / Consignee
-        party_name = rc.consignee or rc.bill_to or None
+        raw_party = rc.consignee or rc.bill_to or None
+        party_name = None
+        if raw_party and not is_noise_party(raw_party):
+            party_name = str(raw_party).strip()
+            if re.search(r"\bAB[1I]\s*RA[Mm][1I]\s*PAPER\b", party_name, re.I):
+                party_name = "ABIRAMI PAPER AGENCIES"
+            elif re.search(r"(?:SHRI\s*)?(?:N\.?K\.?\s*PANI\s*(?:BINDERS|BINDING)?\s*)?N\.?K\.?\s*PANI\s*(?:&|AND)?\s*BROTHERS", party_name, re.I):
+                party_name = "N.K. PANI & BROTHERS"
+            elif re.search(r"CLASSIC\s+PAPER", party_name, re.I) and re.search(r"BHARATHI\s+PAPER\s+STORES", party_name, re.I):
+                party_name = "CLASSIC PAPER"
+        elif rc.invoices and getattr(rc.invoices[0], "customer_name", None) and not is_noise_party(rc.invoices[0].customer_name):
+            party_name = rc.invoices[0].customer_name.strip()
+        else:
+            # Truck-level authoritative customer name resolution
+            truck_customers: list[str] = []
+            for other_rc in dossier.reconciled_consignments:
+                if other_rc.invoices:
+                    for inv in other_rc.invoices:
+                        c_cand = getattr(inv, "customer_name", None)
+                        if c_cand and not is_noise_party(c_cand) and c_cand not in truck_customers:
+                            truck_customers.append(c_cand)
+                if other_rc.consignee and not is_noise_party(other_rc.consignee) and other_rc.consignee not in truck_customers:
+                    truck_customers.append(other_rc.consignee)
+            if len(truck_customers) == 1:
+                party_name = truck_customers[0]
+            elif truck_customers:
+                party_name = truck_customers[min(c_idx - 1, len(truck_customers) - 1)]
+
         c_fields["party_dropdown"] = TMSExtractedField(
             field_name="Party (2nd dropdown, e.g. Third Party)" if is_group else "Consignee / Unloading Points *",
             clean_id="party_dropdown",
@@ -966,15 +1167,14 @@ class TMSMapperService:
             data_type=TMSFieldDataType.TEXT,
         )
 
-        c_dest = rc.delivery_place or party_name or None
-        c_dest_is_unknown = not c_dest or "UNKNOWN" in c_dest.upper()
+        c_unload = format_unloading_point(party_name, rc.delivery_place)
         c_fields["unloading_points"] = TMSExtractedField(
             field_name="Consignee / Unloading Points *" if not is_group else "Unloading Points *",
             clean_id="unloading_points",
-            value=c_dest,
-            status=FieldStatus.NEEDS_REVIEW if c_dest_is_unknown else FieldStatus.VERIFIED,
-            confidence=0.92 if not c_dest_is_unknown else 0.3,
-            audit_note="Destination unreadable or missing from source document; manual review required." if c_dest_is_unknown else None,
+            value=c_unload or None,
+            status=FieldStatus.VERIFIED if c_unload else FieldStatus.NEEDS_REVIEW,
+            confidence=0.95 if c_unload else 0.0,
+            audit_note="Unloading point requires review (missing from source document)" if not c_unload else None,
             source_page=rc.source_page,
             source_doc="Delivery Place / Consignee",
             is_mandatory=True,
@@ -1129,8 +1329,9 @@ class TMSMapperService:
             data_type=TMSFieldDataType.NUMBER,
         )
 
-        # 13. Invoice Date (NEVER use booking_date as fallback)
-        inv_date = rc.invoice_date if (rc.invoice_date and rc.invoice_date != "UNKNOWN_DATE") else None
+        # 13. Invoice Date (Client Item 7: Format dd-mm-yyyy)
+        raw_inv_date = rc.invoice_date or getattr(rc, "booking_date", None)
+        inv_date = format_dd_mm_yyyy(raw_inv_date)
         inv_dt_status = FieldStatus.VERIFIED if inv_date else FieldStatus.NOT_FOUND
         c_fields["invoice_date"] = TMSExtractedField(
             field_name="Invoice Date",

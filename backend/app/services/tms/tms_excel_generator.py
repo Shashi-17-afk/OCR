@@ -9,8 +9,10 @@ repeating trip/shipper details per consignment/LR row as specified by the client
 import io
 import os
 from pathlib import Path
+import re
 from typing import Any, Optional
 import openpyxl
+from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
@@ -21,9 +23,15 @@ from backend.app.schemas.tms_booking import (
     TMSReviewResponse,
     TMSTruckDossier,
 )
+from backend.app.services.reconciliation.range_compressor import InvoiceRangeCompressor
 from backend.app.services.tms.tms_mapper import (
     DIRECT_BOOKING_COLUMNS,
     GROUP_BOOKING_COLUMNS,
+    format_dd_mm_yyyy,
+    format_unloading_point,
+    is_garbled_driver_name,
+    is_noise_party,
+    normalize_and_validate_lr,
     to_clean_id,
 )
 
@@ -50,20 +58,34 @@ class TMSExcelExporter:
         else:
             wb = cls._create_fallback_workbook()
 
+        # Partition trucks strictly between Direct and Group sheets (Client Item 5)
+        # A truck must NEVER appear on both sheets.
+        direct_trucks = [t for t in review.trucks if not cls._is_group_truck(t)]
+        group_trucks = [t for t in review.trucks if cls._is_group_truck(t)]
+
         # Populate Direct Booking
         if "Direct Booking" in wb.sheetnames:
             ws_direct = wb["Direct Booking"]
-            cls._populate_direct_booking(ws_direct, review.trucks)
+            cls._populate_direct_booking(ws_direct, direct_trucks)
 
         # Populate Group Booking
         if "Group Booking" in wb.sheetnames:
             ws_group = wb["Group Booking"]
-            cls._populate_group_booking(ws_group, review.trucks)
+            cls._populate_group_booking(ws_group, group_trucks)
 
         output_stream = io.BytesIO()
         wb.save(output_stream)
         output_stream.seek(0)
         return output_stream.getvalue()
+
+    @classmethod
+    def _is_group_truck(cls, truck: TMSTruckDossier) -> bool:
+        """Determines whether a truck belongs on Group Booking or Direct Booking sheet."""
+        if truck.booking_type == BookingType.GROUP:
+            return True
+        if truck.booking_type == BookingType.DIRECT:
+            return False
+        return len(truck.consignments or []) > 1
 
     @staticmethod
     def _to_float(val: Any) -> Optional[float]:
@@ -98,14 +120,19 @@ class TMSExcelExporter:
         for c in (truck.consignments or []):
             val = cls._get_field_val(truck, c, "freight_charges", None)
             if val is not None and isinstance(val, (int, float)) and val > 0:
+                # Disallow freight matching truck weight in kg (weight column spillover)
+                if truck.total_gross_weight_mt and abs(float(val) - (truck.total_gross_weight_mt * 1000)) < 1.0:
+                    continue
                 consignment_freights.append(float(val))
         if consignment_freights:
             return round(sum(consignment_freights), 2)
         if truck.total_freight_rs and truck.total_freight_rs > 0:
-            return round(float(truck.total_freight_rs), 2)
+            if not (truck.total_gross_weight_mt and abs(float(truck.total_freight_rs) - (truck.total_gross_weight_mt * 1000)) < 1.0):
+                return round(float(truck.total_freight_rs), 2)
         val = cls._get_field_val(truck, None, "customer_freight_charges", None)
         if val is not None and isinstance(val, (int, float)) and val > 0:
-            return round(float(val), 2)
+            if not (truck.total_gross_weight_mt and abs(float(val) - (truck.total_gross_weight_mt * 1000)) < 1.0):
+                return round(float(val), 2)
         return None
 
     @classmethod
@@ -115,6 +142,56 @@ class TMSExcelExporter:
         if val is not None and isinstance(val, (int, float)) and val > 0:
             return round(float(val), 2)
         return None
+
+    @classmethod
+    def _resolve_5digit_lr(
+        cls,
+        raw_lr: Optional[str],
+        truck_number: Optional[str],
+        truck_weight_mt: Optional[float],
+        running_lr: Optional[int] = None,
+        audit_notes: Optional[list[str]] = None,
+        default_series_anchor: int = 30101,
+    ) -> tuple[str, bool, Optional[str], int]:
+        """
+        Ensures LR number is ALWAYS a 5-digit string (Operations Document Items 2 & 6).
+        'Never leave the cell blank. Always a complete LR number. If unreadable: best reading or
+        suggested consecutive, highlighted yellow, note check LR number.'
+        """
+        # 1. Check if audit notes already specify a suggested consecutive LR
+        if audit_notes:
+            for n in audit_notes:
+                m_sug = re.search(r"suggested consecutive:\s*([1-9]\d{4})", str(n))
+                if m_sug:
+                    sug_val = m_sug.group(1)
+                    return sug_val, True, "check LR number", int(sug_val)
+
+        # 2. Check if raw_lr normalizes to valid 5-digit LR
+        lr_clean, is_valid, note = normalize_and_validate_lr(
+            raw_lr,
+            truck_number,
+            truck_weight_mt,
+        )
+        if is_valid and lr_clean:
+            return lr_clean, False, None, int(lr_clean)
+
+        # 3. If raw_lr has 4 or 5 digits that failed validation (e.g. 4 digits), attempt repair to 5 digits
+        if raw_lr:
+            s_digits = re.sub(r"\D", "", str(raw_lr)).lstrip("0")
+            if len(s_digits) == 4 and not (truck_number and s_digits in truck_number):
+                rep = f"{s_digits}0"
+                if len(rep) == 5:
+                    return rep, True, "check LR number", int(rep)
+
+        # 4. Fallback to consecutive suggestion from running sequence
+        if running_lr and running_lr > 0:
+            suggested_int = running_lr + 1
+            s_lr = str(suggested_int)
+            return s_lr, True, "check LR number", suggested_int
+
+        # 5. Fallback anchor
+        s_lr = str(default_series_anchor)
+        return s_lr, True, "check LR number", default_series_anchor
 
     @classmethod
     def _populate_direct_booking(
@@ -134,12 +211,75 @@ class TMSExcelExporter:
             bottom=Side(style="thin", color="D3D3D3"),
         )
         data_font = Font(name="Calibri", size=10)
+        yellow_fill = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
+        running_direct_lr: Optional[int] = None
+
+        # Header: Booking Type column added on Direct sheet (Client Item 5)
+        hdr_direct = ws.cell(row=5, column=29)
+        hdr_direct.value = "Booking Type"
+        hdr_direct.font = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
+        hdr_direct.fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+        hdr_direct.border = thin_border
+        hdr_direct.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
         current_row = start_row
         for truck in trucks:
             # Map fields for Direct Booking
             first_c = truck.consignments[0] if truck.consignments else None
             first_inv = first_c.invoice_records[0] if (first_c and first_c.invoice_records) else None
+
+            # Direct Booking: Col 11 Unloading Points, Col 12 E-Way Bill, Col 17 Invoice Date
+            raw_unload = cls._get_field_val(truck, first_c, "unloading_points", cls._get_field_val(truck, first_c, "party_dropdown", ""))
+            direct_unload = raw_unload if raw_unload and "UNKNOWN" not in str(raw_unload).upper() else ""
+
+            direct_ewbs = []
+            for c in (truck.consignments or []):
+                for inv in (c.invoice_records or []):
+                    if inv.eway_bill and str(inv.eway_bill).strip() not in direct_ewbs:
+                        direct_ewbs.append(str(inv.eway_bill).strip())
+                c_ewb = cls._get_field_val(truck, c, "eway_bill", "")
+                if c_ewb:
+                    for eb in str(c_ewb).split(","):
+                        eb_s = eb.strip()
+                        if eb_s and eb_s not in direct_ewbs:
+                            direct_ewbs.append(eb_s)
+            direct_eway_val = ", ".join(direct_ewbs)
+
+            raw_inv_dt = (first_inv.invoice_date if (first_inv and first_inv.invoice_date) else cls._get_field_val(truck, first_c, "invoice_date", truck.booking_date))
+            direct_inv_dt = format_dd_mm_yyyy(raw_inv_dt) or ""
+
+            # Direct Booking: Col 14 LR # (Operations Items 2 & 6: Never leave blank)
+            raw_lr = cls._get_field_val(truck, first_c, "lr_number", first_c.lr_number if first_c else "")
+            c_notes = [n for c in (truck.consignments or []) for n in getattr(c, "audit_notes", [])]
+            direct_lr_val, has_check_lr, lr_note, running_direct_lr = cls._resolve_5digit_lr(
+                raw_lr,
+                truck.truck_number,
+                truck.total_gross_weight_mt,
+                running_lr=running_direct_lr,
+                audit_notes=c_notes,
+                default_series_anchor=30101,
+            )
+            if not has_check_lr and first_c and any("check LR number" in str(getattr(f, "audit_note", "") or "") for f in first_c.fields.values()):
+                has_check_lr = True
+
+            # Direct Booking: Col 15 Invoice No (Client Item 4: Range compression in one cell)
+            direct_inv_list = []
+            for c in (truck.consignments or []):
+                for inv in (c.invoice_records or []):
+                    if inv.invoice_no and str(inv.invoice_no).strip() not in direct_inv_list:
+                        direct_inv_list.append(str(inv.invoice_no).strip())
+                c_inv_field = cls._get_field_val(truck, c, "invoice_no", "")
+                if c_inv_field:
+                    for iv in str(c_inv_field).split(","):
+                        iv_s = iv.strip()
+                        if iv_s and "-" not in iv_s and iv_s not in direct_inv_list:
+                            direct_inv_list.append(iv_s)
+            direct_inv_compressed = InvoiceRangeCompressor.compress(direct_inv_list) if direct_inv_list else cls._get_field_val(truck, first_c, "invoice_no", "")
+
+            # Direct Booking: Col 19 Driver Name (Operations Audit: leave blank and highlight if misread/unsure)
+            raw_driver = cls._get_field_val(truck, None, "driver_name", "")
+            has_check_driver = is_garbled_driver_name(raw_driver)
+            direct_driver_val = "" if has_check_driver else (raw_driver or "")
 
             # Values mapping by column index (1-based)
             row_vals: dict[int, Any] = {
@@ -153,15 +293,15 @@ class TMSExcelExporter:
                 8: truck.total_packages if truck.total_packages > 0 else cls._get_field_val(truck, first_c, "no_of_packs", ""),
                 9: cls._get_field_val(truck, None, "cargo_type", "Paper Reels / Bundles"),
                 10: cls._get_field_val(truck, None, "loading_points", "Cheranmahadevi / Tirunelveli"),
-                11: cls._get_field_val(truck, first_c, "unloading_points", cls._get_field_val(truck, first_c, "party_dropdown", "")),
-                12: (first_inv.eway_bill if (first_inv and first_inv.eway_bill) else cls._get_field_val(truck, first_c, "eway_bill", "")),
+                11: direct_unload,
+                12: direct_eway_val,
                 13: cls._get_field_val(truck, first_c, "eway_expiry", ""),
-                14: cls._get_field_val(truck, first_c, "lr_number", first_c.lr_number if first_c else ""),
-                15: (first_inv.invoice_no if (first_inv and first_inv.invoice_no) else cls._get_field_val(truck, first_c, "invoice_no", "")),
+                14: direct_lr_val,
+                15: direct_inv_compressed,
                 16: (first_inv.invoice_value if (first_inv and first_inv.invoice_value is not None) else cls._get_field_val(truck, first_c, "invoice_value", "")),
-                17: (first_inv.invoice_date if (first_inv and first_inv.invoice_date) else cls._get_field_val(truck, first_c, "invoice_date", "")),
+                17: direct_inv_dt,
                 18: cls._get_field_val(truck, None, "license_plate", truck.truck_number),
-                19: cls._get_field_val(truck, None, "driver_name", ""),
+                19: direct_driver_val,
                 20: cls._get_field_val(truck, None, "driver_phone", ""),
                 21: cls._get_field_val(truck, None, "vendor_name", ""),
                 22: cls._get_field_val(truck, None, "account_number", ""),
@@ -187,6 +327,13 @@ class TMSExcelExporter:
                         cell.number_format = "#,##0.000"
                     else:
                         cell.value = ""
+                    wt_note = next(
+                        (n for c in (truck.consignments or []) for n in getattr(c, "audit_notes", []) if "Weight discrepancy" in str(n)),
+                        None,
+                    )
+                    if wt_note:
+                        cell.fill = yellow_fill
+                        cell.comment = Comment(wt_note, "System")
                 elif col_idx == 8:
                     i_val = cls._to_int(val)
                     if i_val is not None and i_val > 0:
@@ -194,6 +341,13 @@ class TMSExcelExporter:
                         cell.number_format = "#,##0"
                     else:
                         cell.value = ""
+                    pkg_note = next(
+                        (n for c in (truck.consignments or []) for n in getattr(c, "audit_notes", []) if "Package count discrepancy" in str(n)),
+                        None,
+                    )
+                    if pkg_note:
+                        cell.fill = yellow_fill
+                        cell.comment = Comment(pkg_note, "System")
                 elif col_idx == 16:
                     f_val = cls._to_float(val)
                     if f_val is not None and f_val > 0:
@@ -201,6 +355,11 @@ class TMSExcelExporter:
                         cell.number_format = "#,##0.00"
                     else:
                         cell.value = ""
+                elif col_idx == 19:
+                    cell.value = str(val) if val is not None and val != "" else ""
+                    if has_check_driver:
+                        cell.fill = yellow_fill
+                        cell.comment = Comment("check driver name", "System")
                 elif col_idx == 27:
                     f_val = cls._to_float(val)
                     if f_val is not None:
@@ -219,12 +378,22 @@ class TMSExcelExporter:
                     # Ensure identifiers with potential leading zeros are strings
                     cell.value = str(val) if val is not None and val != "" else ""
                     cell.number_format = "@"
+                    if col_idx == 14 and has_check_lr:
+                        cell.fill = yellow_fill
+                        cell.comment = Comment("check LR number", "System")
                 else:
                     cell.value = val if val is not None else ""
 
                 cell.font = data_font
                 cell.border = thin_border
                 cell.alignment = Alignment(vertical="center")
+
+            # Column 29: Booking Type (Client Item 5)
+            c29_cell = ws.cell(row=current_row, column=29)
+            c29_cell.value = "Direct"
+            c29_cell.font = data_font
+            c29_cell.border = thin_border
+            c29_cell.alignment = Alignment(horizontal="center", vertical="center")
 
             current_row += 1
 
@@ -248,15 +417,25 @@ class TMSExcelExporter:
             bottom=Side(style="thin", color="D3D3D3"),
         )
         data_font = Font(name="Calibri", size=10)
+        yellow_fill = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
+        running_group_lr: Optional[int] = None
+
+        # Header: Booking Type column added on Group sheet (Client Item 5)
+        hdr_group = ws.cell(row=5, column=73)
+        hdr_group.value = "Booking Type"
+        hdr_group.font = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
+        hdr_group.fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+        hdr_group.border = thin_border
+        hdr_group.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
         current_row = start_row
-        for truck in trucks:
+        for t_idx, truck in enumerate(trucks):
             consignments = truck.consignments or []
             if not consignments:
                 # If no consignments, create at least one dummy line
                 consignments = [None]
 
-            for c_item in consignments:
+            for c_idx, c_item in enumerate(consignments):
                 r = current_row
 
                 # Step 1: Booking (entered once) - cols 1-7
@@ -279,7 +458,43 @@ class TMSExcelExporter:
                 c15_vol = cls._get_field_val(truck, None, "cubic_vol", "")
                 c16_cargo = cls._get_field_val(truck, None, "cargo_type", "Paper Reels / Bundles")
                 c17_load_point = cls._get_field_val(truck, None, "loading_points", "Cheranmahadevi / Tirunelveli")
-                c18_unload_point = cls._get_field_val(truck, c_item, "unloading_points", cls._get_field_val(truck, c_item, "party_dropdown", ""))
+
+                # Step 2: Consignment block (one row per LR) - cols 31-46
+                first_inv = c_item.invoice_records[0] if (c_item and c_item.invoice_records) else None
+                c31_code = c_item.consignment_code if c_item else "1A"
+                c32_ship_drop = c8_shipper
+
+                # Determine clean party for this consignment (Col 33)
+                c_party_field = c_item.fields.get("party_dropdown").value if (c_item and c_item.fields.get("party_dropdown")) else None
+                raw_party = c_party_field or cls._get_field_val(truck, c_item, "party_dropdown", "")
+                if raw_party and not is_noise_party(raw_party):
+                    c33_party = str(raw_party).strip()
+                    if re.search(r"\bAB[1I]\s*RA[Mm][1I]\s*PAPER\b", c33_party, re.I):
+                        c33_party = "ABIRAMI PAPER AGENCIES"
+                    elif re.search(r"(?:SHRI\s*)?(?:N\.?K\.?\s*PANI\s*(?:BINDERS|BINDING)?\s*)?N\.?K\.?\s*PANI\s*(?:&|AND)?\s*BROTHERS", c33_party, re.I):
+                        c33_party = "N.K. PANI & BROTHERS"
+                    elif re.search(r"CLASSIC\s+PAPER", c33_party, re.I) and re.search(r"BHARATHI\s+PAPER\s+STORES", c33_party, re.I):
+                        c33_party = "CLASSIC PAPER"
+                elif first_inv and getattr(first_inv, "customer_name", None) and not is_noise_party(first_inv.customer_name):
+                    c33_party = first_inv.customer_name.strip()
+                else:
+                    # Look across truck's other consignments for clean party
+                    cand_party = ""
+                    for oc in truck.consignments:
+                        oc_val = oc.fields.get("party_dropdown").value if (oc and oc.fields.get("party_dropdown")) else ""
+                        if oc_val and not is_noise_party(oc_val):
+                            cand_party = str(oc_val).strip()
+                            break
+                    c33_party = cand_party or c8_shipper
+
+                # Determine clean consignment unloading point (Col 18) strictly per row (<Party>, <Place>)
+                c_unload_field = c_item.fields.get("unloading_points").value if (c_item and c_item.fields.get("unloading_points")) else None
+                if c_unload_field and not is_noise_party(c_unload_field) and not bool(re.search(r"[-:]\d+|\)\d+", str(c_unload_field))):
+                    c18_unload_point = str(c_unload_field).strip()
+                else:
+                    c_dest = cls._get_field_val(truck, c_item, "delivery_place", "")
+                    c18_unload_point = format_unloading_point(c33_party, c_dest)
+
                 c19_veh_type = cls._get_field_val(truck, None, "vehicle_type", "Open Body / Tarpaulin")
                 c20_del_on = cls._get_field_val(truck, None, "delivery_on", "")
                 c21_pod_on = cls._get_field_val(truck, None, "pod_on", "")
@@ -287,31 +502,72 @@ class TMSExcelExporter:
                 # Step 2: Trip detail - cols 22-30
                 c22_vendor_type = cls._get_field_val(truck, None, "vendor_type", "Market")
                 c23_plate = truck.truck_number
-                c24_driver_name = cls._get_field_val(truck, None, "driver_name", "")
+                raw_c24 = cls._get_field_val(truck, None, "driver_name", "")
+                has_check_driver_grp = is_garbled_driver_name(raw_c24)
+                c24_driver_name = "" if has_check_driver_grp else (raw_c24 or "")
                 c25_driver_phone = cls._get_field_val(truck, None, "driver_phone", "")
                 c26_license = cls._get_field_val(truck, None, "driver_license", "")
                 c27_dob = cls._get_field_val(truck, None, "driver_dob", "")
                 c28_ins_co = cls._get_field_val(truck, None, "insurance_company", "")
                 c29_ins_ref = cls._get_field_val(truck, None, "insurance_reference", "")
                 c30_gps = cls._get_field_val(truck, None, "gps_provider", "")
-
-                # Step 2: Consignment block (one row per LR) - cols 31-46
-                first_inv = c_item.invoice_records[0] if (c_item and c_item.invoice_records) else None
-                c31_code = c_item.consignment_code if c_item else "1A"
-                c32_ship_drop = c8_shipper
-                c33_party = cls._get_field_val(truck, c_item, "party_dropdown", cls._get_field_val(truck, c_item, "unloading_points", ""))
                 c34_packs = cls._get_field_val(truck, c_item, "no_of_packs", "")
                 c35_wt = cls._get_field_val(truck, c_item, "weight", "")
                 c36_unit_c = "MT"
                 c37_vol_c = cls._get_field_val(truck, c_item, "volume", "")
-                c38_lr = cls._get_field_val(truck, c_item, "lr_number", c_item.lr_number if c_item else "")
-                c39_lr_rem = cls._get_field_val(truck, c_item, "lr_remarks", "")
-                c40_eway = (first_inv.eway_bill if (first_inv and first_inv.eway_bill) else cls._get_field_val(truck, c_item, "eway_bill", ""))
+                # Group Booking: Col 38 LR Number, Col 39 LR Remarks (Operations Items 2 & 6: Never leave blank)
+                raw_c38 = cls._get_field_val(truck, c_item, "lr_number", c_item.lr_number if c_item else "")
+                c_notes = getattr(c_item, "audit_notes", []) if c_item else []
+                group_lr_val, has_check_lr, lr_note, running_group_lr = cls._resolve_5digit_lr(
+                    raw_c38,
+                    truck.truck_number,
+                    truck.total_gross_weight_mt,
+                    running_lr=running_group_lr,
+                    audit_notes=c_notes,
+                    default_series_anchor=29732,
+                )
+                if not has_check_lr and c_item and any("check LR number" in str(getattr(f, "audit_note", "") or "") for f in c_item.fields.values()):
+                    has_check_lr = True
+                c38_lr = group_lr_val
+                c39_lr_rem = "check LR number" if has_check_lr else cls._get_field_val(truck, c_item, "lr_remarks", "")
+
+                # Client Item 8: Comma-separated E-Way bills, never empty if source carries it
+                c_ewbs = []
+                if c_item:
+                    for inv in (c_item.invoice_records or []):
+                        if inv.eway_bill and str(inv.eway_bill).strip() not in c_ewbs:
+                            c_ewbs.append(str(inv.eway_bill).strip())
+                    c_ewb_f = cls._get_field_val(truck, c_item, "eway_bill", "")
+                    if c_ewb_f:
+                        for eb in str(c_ewb_f).split(","):
+                            eb_s = eb.strip()
+                            if eb_s and eb_s not in c_ewbs:
+                                c_ewbs.append(eb_s)
+                c40_eway = ", ".join(c_ewbs)
+
                 c41_expiry = cls._get_field_val(truck, c_item, "eway_expiry", "")
                 c42_desc = cls._get_field_val(truck, c_item, "description_cargo_type", "Paper Reels / Bundles")
-                c43_inv = (first_inv.invoice_no if (first_inv and first_inv.invoice_no) else cls._get_field_val(truck, c_item, "invoice_no", ""))
+
+                # Client Item 4: Range compression in one cell per LR
+                c_inv_list = []
+                if c_item:
+                    for inv in (c_item.invoice_records or []):
+                        if inv.invoice_no and str(inv.invoice_no).strip() not in c_inv_list:
+                            c_inv_list.append(str(inv.invoice_no).strip())
+                    c_inv_f = cls._get_field_val(truck, c_item, "invoice_no", "")
+                    if c_inv_f:
+                        for iv in str(c_inv_f).split(","):
+                            iv_s = iv.strip()
+                            if iv_s and "-" not in iv_s and iv_s not in c_inv_list:
+                                c_inv_list.append(iv_s)
+                c43_inv = InvoiceRangeCompressor.compress(c_inv_list) if c_inv_list else cls._get_field_val(truck, c_item, "invoice_no", "")
+
                 c44_inv_val = (first_inv.invoice_value if (first_inv and first_inv.invoice_value is not None) else cls._get_field_val(truck, c_item, "invoice_value", ""))
-                c45_inv_dt = (first_inv.invoice_date if (first_inv and first_inv.invoice_date) else cls._get_field_val(truck, c_item, "invoice_date", ""))
+
+                # Client Item 7: Invoice Date format dd-mm-yyyy
+                raw_c45 = (first_inv.invoice_date if (first_inv and first_inv.invoice_date) else cls._get_field_val(truck, c_item, "invoice_date", truck.booking_date))
+                c45_inv_dt = format_dd_mm_yyyy(raw_c45) or ""
+
                 c46_c_freight = cls._get_field_val(truck, c_item, "freight_charges", "")
 
                 # Step 3: Vendor / Pricing - cols 47-72
@@ -326,7 +582,18 @@ class TMSExcelExporter:
                 c55_basis = cls._get_field_val(truck, None, "billing_basis", "")
                 c56_adv_pct = cls._get_field_val(truck, None, "advance_pct", 0.0)
                 c57_upload = cls._get_field_val(truck, None, "upload_file_type", "")
-                c58_cust_freight = cls._get_truck_total_freight(truck)
+
+                # Prevent truck-level freight duplication across Group consignment rows (Audit Item 6)
+                c_item_freight = cls._get_field_val(truck, c_item, "freight_charges", None)
+                truck_has_split_freight = any(
+                    cls._get_field_val(truck, oc, "freight_charges", None) not in (None, "", 0, 0.0)
+                    for oc in (truck.consignments or [])
+                )
+                if truck_has_split_freight:
+                    c58_cust_freight = float(c_item_freight) if (c_item_freight is not None and c_item_freight != "") else 0.0
+                else:
+                    c58_cust_freight = cls._get_truck_total_freight(truck) if c_idx == 0 else 0.0
+
                 c59_cust_load = cls._get_field_val(truck, None, "customer_loading_charges", 0.0)
                 c60_cust_unload = cls._get_field_val(truck, None, "customer_unloading_charges", 0.0)
                 c61_cust_det = cls._get_field_val(truck, None, "customer_detention_charges", 0.0)
@@ -388,6 +655,14 @@ class TMSExcelExporter:
                             cell.number_format = "#,##0.000"
                         else:
                             cell.value = ""
+                        if col_idx == 13:
+                            wt_note_grp = next(
+                                (n for c in (truck.consignments or []) for n in getattr(c, "audit_notes", []) if "Weight discrepancy" in str(n)),
+                                None,
+                            )
+                            if wt_note_grp:
+                                cell.fill = yellow_fill
+                                cell.comment = Comment(wt_note_grp, "System")
                     elif col_idx in (12, 34):
                         i_val = cls._to_int(val)
                         if i_val is not None and i_val > 0:
@@ -395,6 +670,14 @@ class TMSExcelExporter:
                             cell.number_format = "#,##0"
                         else:
                             cell.value = ""
+                        if col_idx == 12:
+                            pkg_note_grp = next(
+                                (n for c in (truck.consignments or []) for n in getattr(c, "audit_notes", []) if "Package count discrepancy" in str(n)),
+                                None,
+                            )
+                            if pkg_note_grp:
+                                cell.fill = yellow_fill
+                                cell.comment = Comment(pkg_note_grp, "System")
                     elif col_idx == 44:
                         f_val = cls._to_float(val)
                         if f_val is not None and f_val > 0:
@@ -420,6 +703,18 @@ class TMSExcelExporter:
                         # Leading zero preservation
                         cell.value = str(val) if val is not None and val != "" else ""
                         cell.number_format = "@"
+                        if col_idx == 38 and has_check_lr:
+                            cell.fill = yellow_fill
+                            cell.comment = Comment("check LR number", "System")
+                    elif col_idx == 24:
+                        cell.value = str(val) if val is not None and val != "" else ""
+                        if has_check_driver_grp:
+                            cell.fill = yellow_fill
+                            cell.comment = Comment("check driver name", "System")
+                    elif col_idx == 39:
+                        cell.value = str(val) if val is not None and val != "" else ""
+                        if has_check_lr:
+                            cell.fill = yellow_fill
                     else:
                         cell.value = val if val is not None else ""
 
@@ -427,6 +722,17 @@ class TMSExcelExporter:
                     cell.border = thin_border
                     cell.alignment = Alignment(vertical="center")
 
+                # Column 73: Booking Type (Client Item 5)
+                c73_cell = ws.cell(row=current_row, column=73)
+                c73_cell.value = "Group"
+                c73_cell.font = data_font
+                c73_cell.border = thin_border
+                c73_cell.alignment = Alignment(horizontal="center", vertical="center")
+
+                current_row += 1
+
+            # Blank row between trucks on Group sheet (Client Item 3)
+            if t_idx < len(trucks) - 1:
                 current_row += 1
 
     @staticmethod

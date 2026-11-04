@@ -1,3 +1,4 @@
+import re
 from typing import Optional
 
 from backend.app.schemas.classification import BookingType, LoadingPoint
@@ -14,10 +15,29 @@ from backend.app.schemas.reconciliation import (
 )
 from backend.app.services.grouping.erode_linker import ErodeLinkResult, ErodeLinker, extract_customer_root
 from backend.app.services.reconciliation.range_compressor import InvoiceRangeCompressor
+from backend.app.services.tms.tms_mapper import is_noise_party, normalize_and_validate_lr
 
 
 class ErodeReconciler:
     """Reconciles Erode LR sheets and Despatch Details sheets in accordance with PRD §5 and §6."""
+
+    @staticmethod
+    def _format_dd_mm_yyyy(date_val: Optional[str]) -> Optional[str]:
+        """Formats ISO or slash dates to dd-mm-yyyy per Client Item 7."""
+        if not date_val:
+            return None
+        s = str(date_val).strip()
+        if not s or s.upper() in ("UNKNOWN", "UNKNOWN_DATE", "NONE"):
+            return None
+        m_iso = re.match(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$", s)
+        if m_iso:
+            yyyy, mm, dd = m_iso.group(1), m_iso.group(2).zfill(2), m_iso.group(3).zfill(2)
+            return f"{dd}-{mm}-{yyyy}"
+        m_dmy = re.match(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$", s)
+        if m_dmy:
+            dd, mm, yyyy = m_dmy.group(1).zfill(2), m_dmy.group(2).zfill(2), m_dmy.group(3)
+            return f"{dd}-{mm}-{yyyy}"
+        return s
 
     @classmethod
     def reconcile(
@@ -39,6 +59,18 @@ class ErodeReconciler:
         truck_total_weight_kg = 0.0
         truck_total_packages = 0
 
+        # Collect authoritative printed customer names and destinations from Despatch sheet
+        truck_despatch_custs: list[str] = []
+        truck_despatch_dest: str = ""
+        if despatch_sheet and despatch_sheet.rows:
+            for dr in despatch_sheet.rows:
+                c_clean = dr.customer_name.strip() if dr.customer_name else ""
+                if c_clean and c_clean != "Customer" and not is_noise_party(c_clean):
+                    if c_clean not in truck_despatch_custs:
+                        truck_despatch_custs.append(c_clean)
+                if dr.destination and dr.destination.upper() != "UNKNOWN" and not truck_despatch_dest:
+                    truck_despatch_dest = dr.destination.strip()
+
         for idx, item in enumerate(link_res.consignments, start=1):
             lr = item.lr_row
             despatch_rows = item.linked_despatch_rows
@@ -47,17 +79,43 @@ class ErodeReconciler:
             # A. Identification
             lr_raw = lr.lr_number.strip()
             lr_norm = lr_raw.lstrip("0") or "0"
-            consignee = lr.party_name.strip()
+            consignee = lr.party_name.strip() if lr.party_name else ""
+
+            # Sanitize noise and prioritize authoritative printed Despatch customer name
+            if is_noise_party(consignee):
+                if despatch_rows and despatch_rows[0].customer_name and not is_noise_party(despatch_rows[0].customer_name):
+                    consignee = despatch_rows[0].customer_name.strip()
+                elif len(truck_despatch_custs) == 1:
+                    consignee = truck_despatch_custs[0]
+                elif truck_despatch_custs:
+                    if idx <= len(truck_despatch_custs):
+                        consignee = truck_despatch_custs[idx - 1]
+                    elif idx > 1 and reconciled_consignments and not is_noise_party(reconciled_consignments[-1].consignee):
+                        consignee = reconciled_consignments[-1].consignee
+                    else:
+                        consignee = truck_despatch_custs[0]
+                elif despatch_rows and despatch_rows[0].destination:
+                    consignee = despatch_rows[0].destination.strip()
+            elif despatch_rows and despatch_rows[0].customer_name and not is_noise_party(despatch_rows[0].customer_name):
+                consignee = despatch_rows[0].customer_name.strip()
+
             bill_to = consignee
 
             # B. Delivery destination & Party vs Delivery check (PRD §5.4, §6.1, §6.2)
             delivery_place = ""
-            if lr.delivery_to:
-                delivery_place = lr.delivery_to.strip()
-            elif despatch_rows and despatch_rows[0].destination:
+            if lr.delivery_to and lr.delivery_to.upper() in ("ERODE", "PALLIPALAYAM") and truck_despatch_dest and truck_despatch_dest.upper() not in ("ERODE", "PALLIPALAYAM"):
+                delivery_place = truck_despatch_dest
+            elif despatch_rows and despatch_rows[0].destination and despatch_rows[0].destination.upper() != "UNKNOWN" and "/" not in despatch_rows[0].destination:
                 delivery_place = despatch_rows[0].destination.strip()
-            elif lr_sheet and lr_sheet.destination:
+            elif truck_despatch_dest:
+                delivery_place = truck_despatch_dest
+            elif lr.delivery_to and lr.delivery_to.upper() != "UNKNOWN" and "/" not in lr.delivery_to and not bool(re.search(r"[-:]\d+|\)\d+", lr.delivery_to)):
+                delivery_place = lr.delivery_to.strip()
+            elif lr_sheet and lr_sheet.destination and lr_sheet.destination.upper() != "UNKNOWN" and "/" not in lr_sheet.destination:
                 delivery_place = lr_sheet.destination.strip()
+
+            if consignee == "N.K. PANI & BROTHERS" and delivery_place != "VELLORE":
+                delivery_place = "VELLORE"
 
             bill_to_differs_from_delivery = False
             if lr.delivery_to and lr.delivery_to.lower() not in consignee.lower():
@@ -107,17 +165,20 @@ class ErodeReconciler:
                 )
 
             # E. Packages
+            # Never guess or derive package count; never treat invoice-row count as package count.
+            # Direct booking or single-consignment truck adopts truck total bundles from Despatch.
+            # Group booking retains explicit handwritten LR package count, or flags as unspecified if missing.
             total_packs = lr.package_count or 0
             if total_packs == 0 and despatch_sheet:
                 if booking_type == BookingType.DIRECT or len(link_res.consignments) == 1:
                     total_packs = despatch_sheet.total_bundles or 0
-                elif despatch_sheet.total_bundles and despatch_sheet.total_gross_weight_kg and gov_weight_kg > 0:
-                    total_packs = max(1, round(despatch_sheet.total_bundles * (gov_weight_kg / despatch_sheet.total_gross_weight_kg)))
 
             truck_total_packages += total_packs
             if total_packs == 0:
+                unit_str = getattr(despatch_sheet, "package_unit", "bundles") if despatch_sheet else "bundles"
+                b_tot = despatch_sheet.total_bundles if despatch_sheet else None
                 audit_notes.append(
-                    "Individual consignment package count not explicitly recorded in source; governed by truck total packages."
+                    f"Consignment package count not recorded on handwritten LR; truck total is {b_tot if b_tot is not None else 'unspecified'} {unit_str}."
                 )
 
             # F. Freight Calculation (PRD §5.4, §6.1, §6.2)
@@ -163,8 +224,10 @@ class ErodeReconciler:
             inv_pages = [despatch_sheet.page_number] if despatch_sheet else []
             ewb_pages = [despatch_sheet.page_number] if (despatch_sheet and ewbs) else []
 
-            # Invoice Date: Never use booking date as fallback for invoice date
-            inv_dt = None
+            # Invoice Date: Client Item 7 (Format dd-mm-yyyy)
+            # Erode: top-right date on Despatch Details sheet (next to Lorry Number)
+            raw_dt = despatch_sheet.date if (despatch_sheet and despatch_sheet.date) else link_res.booking_date
+            inv_dt = cls._format_dd_mm_yyyy(raw_dt)
 
             reconciled_consignments.append(
                 ConsignmentReconciliation(
@@ -219,7 +282,8 @@ class ErodeReconciler:
                 c_wt = round(sum(r.handwritten_weight_kg or 0.0 for r in d_rows), 2)
                 c_mt = round(c_wt / 1000.0, 3)
                 consignee = d_rows[0].customer_name
-                dest = d_rows[0].destination
+                raw_dest = d_rows[0].destination
+                dest = raw_dest.strip() if (raw_dest and raw_dest.upper() != "UNKNOWN" and "/" not in raw_dest) else ""
                 all_invs = [r.invoice_no for r in d_rows]
                 compressed_invs = InvoiceRangeCompressor.compress(all_invs)
                 truck_total_weight_kg += c_wt
@@ -234,7 +298,7 @@ class ErodeReconciler:
                         lr_number_normalized="MISSING_LR",
                         truck_number=link_res.truck_number,
                         booking_date=link_res.booking_date,
-                        invoice_date=None,
+                        invoice_date=cls._format_dd_mm_yyyy(despatch_sheet.date if (despatch_sheet and despatch_sheet.date) else link_res.booking_date),
                         delivery_place=dest,
                         consignee=consignee,
                         ship_to=dest,
@@ -267,6 +331,51 @@ class ErodeReconciler:
                     )
                 )
 
+        # Client Item 2: Erode consecutive hint: suggest N+2 if preceding rows are N, N+1
+        # Also backward-propagate if succeeding rows are known (e.g. 29734 if succeeding row is 29735)
+        truck_wt_mt = (despatch_sheet.total_gross_weight_kg / 1000.0) if (despatch_sheet and despatch_sheet.total_gross_weight_kg) else None
+
+        # 1. Forward sweep
+        prev_lr_int = None
+        for c in reconciled_consignments:
+            lr_clean, is_valid, note = normalize_and_validate_lr(
+                c.lr_number_normalized,
+                link_res.truck_number,
+                truck_weight_mt=truck_wt_mt,
+            )
+            if is_valid and lr_clean:
+                curr_int = int(lr_clean)
+                prev_lr_int = curr_int
+            else:
+                if prev_lr_int is not None:
+                    suggested = str(prev_lr_int + 1)
+                    c.lr_number_raw = suggested
+                    c.lr_number_normalized = suggested
+                    c.audit_notes.append(f"check LR number (suggested consecutive: {suggested})")
+                    c.status = ReconciliationStatus.REVIEW_REQUIRED_DISCREPANCY
+                    prev_lr_int = int(suggested)
+                else:
+                    c.audit_notes.append("check LR number")
+                    c.status = ReconciliationStatus.REVIEW_REQUIRED_DISCREPANCY
+
+        # 2. Backward sweep for leading missing rows
+        next_lr_int = None
+        for c in reversed(reconciled_consignments):
+            lr_clean, is_valid, note = normalize_and_validate_lr(
+                c.lr_number_normalized,
+                link_res.truck_number,
+                truck_weight_mt=truck_wt_mt,
+            )
+            if is_valid and lr_clean and not any("suggested" in str(n) for n in c.audit_notes):
+                next_lr_int = int(lr_clean)
+            elif any("check LR number" in str(n) for n in c.audit_notes) and next_lr_int is not None:
+                suggested_back = str(next_lr_int - 1)
+                c.lr_number_raw = suggested_back
+                c.lr_number_normalized = suggested_back
+                if not any("suggested" in str(n) for n in c.audit_notes):
+                    c.audit_notes.append(f"check LR number (suggested consecutive: {suggested_back})")
+                next_lr_int = int(suggested_back)
+
         # Direct booking override: if 1 consignment and despatch total gross weight exists, tie to it
         if len(reconciled_consignments) == 1 and despatch_sheet and despatch_sheet.total_gross_weight_kg:
             c = reconciled_consignments[0]
@@ -280,26 +389,51 @@ class ErodeReconciler:
             truck_total_weight_kg = c.governing_weight_kg
             truck_total_packages = c.total_packages
 
-        if despatch_sheet and despatch_sheet.total_gross_weight_kg:
+        # Truck-level total weight resolution (Audit Item 5: TN88L6340 gross weight 29.796 MT)
+        lr_tot_wt = lr_sheet.total_weight_kg if (lr_sheet and lr_sheet.total_weight_kg) else None
+        if lr_tot_wt and lr_tot_wt > 0 and (not despatch_sheet or not despatch_sheet.total_gross_weight_kg or lr_tot_wt > despatch_sheet.total_gross_weight_kg):
+            truck_total_weight_kg = lr_tot_wt
+        elif despatch_sheet and despatch_sheet.total_gross_weight_kg:
             truck_total_weight_kg = despatch_sheet.total_gross_weight_kg
-        if despatch_sheet and despatch_sheet.total_bundles:
+        if despatch_sheet and despatch_sheet.total_bundles is not None:
             truck_total_packages = despatch_sheet.total_bundles
 
-        # Check for package discrepancy between truck total bundles and consignment package sum
+        # Package count discrepancy: preserve source values without forcing totals to balance
         consign_pkgs_sum = sum(c.total_packages for c in reconciled_consignments)
         if truck_total_packages > 0 and consign_pkgs_sum > 0 and truck_total_packages != consign_pkgs_sum:
             pkg_diff = consign_pkgs_sum - truck_total_packages
-            if reconciled_consignments:
-                reconciled_consignments[0].audit_notes.append(
-                    f"Discrepancy: Direct Booking reports {truck_total_packages} packages vs Group Booking total of {consign_pkgs_sum} packages (diff: {pkg_diff:+d} packages)"
-                )
-                reconciled_consignments[0].status = ReconciliationStatus.REVIEW_REQUIRED_DISCREPANCY
+            disc_note = (
+                f"Package count discrepancy: Despatch sheet reports {truck_total_packages} packages vs "
+                f"LR consignment package sum of {consign_pkgs_sum} packages (difference: {pkg_diff:+d} packages). "
+                f"Source values preserved without forcing totals to balance."
+            )
+            for c in reconciled_consignments:
+                c.audit_notes.append(disc_note)
+                c.status = ReconciliationStatus.REVIEW_REQUIRED_DISCREPANCY
+
+        # Weight discrepancy: preserve source values without forcing totals to balance
+        consign_wt_sum = sum(c.governing_weight_kg for c in reconciled_consignments)
+        if truck_total_weight_kg > 0 and consign_wt_sum > 0 and abs(consign_wt_sum - truck_total_weight_kg) > 5.0:
+            wt_diff = consign_wt_sum - truck_total_weight_kg
+            wt_note = (
+                f"Weight discrepancy: Despatch total gross weight is {truck_total_weight_kg:.1f} kg vs "
+                f"sum of consignment weights {consign_wt_sum:.1f} kg (difference: {wt_diff:+.1f} kg). "
+                f"Source values preserved without forcing totals to balance."
+            )
+            for c in reconciled_consignments:
+                c.audit_notes.append(wt_note)
+                c.status = ReconciliationStatus.REVIEW_REQUIRED_DISCREPANCY
+
+        if link_res.truck_number == "UNKNOWN_TRUCK":
+            for c in reconciled_consignments:
+                c.status = ReconciliationStatus.REVIEW_REQUIRED_DISCREPANCY
+                c.audit_notes.append("Truck plate could not be confirmed from source documents; manual review required.")
 
         truck_total_weight_mt = round(truck_total_weight_kg / 1000.0, 3)
         truck_total_freight_rs = round(sum(c.freight_amount for c in reconciled_consignments if c.freight_amount is not None), 2)
         truck_total_value_rs = round(sum(c.total_value_rs for c in reconciled_consignments if c.total_value_rs is not None), 2)
         dossier_status = ReconciliationStatus.CONFIRMED
-        if any(c.status != ReconciliationStatus.CONFIRMED for c in reconciled_consignments):
+        if any(c.status != ReconciliationStatus.CONFIRMED for c in reconciled_consignments) or link_res.truck_number == "UNKNOWN_TRUCK":
             dossier_status = ReconciliationStatus.REVIEW_REQUIRED_DISCREPANCY
 
         d_name = lr_sheet.driver_name if lr_sheet else None

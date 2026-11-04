@@ -199,6 +199,9 @@
   function handleFileSelect(file) {
     state.selectedFile = file;
     state.fileBlobUrl = URL.createObjectURL(file);
+    state.tmsReviewData = null;
+    state.reconciliationData = null;
+    state.activeTruckIndex = 0;
 
     // Auto-detect loading point from filename signals if user hasn't explicitly locked it
     const nameLower = (file.name || '').toLowerCase();
@@ -444,6 +447,10 @@
 
   async function runExtractionAndMapping() {
     if (!state.selectedFile) return;
+
+    state.tmsReviewData = null;
+    state.reconciliationData = null;
+    state.activeTruckIndex = 0;
 
     elements.processingOverlay.style.display = 'flex';
     elements.processingTitle.textContent = 'Analyzing Logistics Documents';

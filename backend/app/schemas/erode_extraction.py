@@ -82,13 +82,17 @@ class ErodeLRRow(BaseModel):
         description="Delivery destination or unloading party if specified",
     )
     raw_invoice_text: str = Field(
+        default="",
         description="Raw invoice string written on the line (e.g. 'I. 1250510479/480')",
     )
     invoices: list[str] = Field(
         default_factory=list,
         description="Expanded normalized invoice numbers for this LR",
     )
-    packages_str: str = Field(description="Package description string (e.g. '3 reels', '53 reels')")
+    packages_str: str = Field(
+        default="",
+        description="Package description string (e.g. '3 reels', '53 reels')",
+    )
     package_count: Optional[int] = Field(default=None, description="Parsed numeric package count")
     package_type: str = Field(default="reels", description="Extracted package type (reels, bundles, boxes, etc.)")
     weight_kg: Optional[float] = Field(
